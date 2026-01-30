@@ -177,23 +177,95 @@ pub fn execute(&mut self, cmd: &str) -> CogResult {
 
 ## Key Principles
 
-### No FPU
+### Two-Layer Architecture: Addressing vs Compute
 
-All operations must work with pure integer arithmetic:
-- Hamming distance via popcount
-- Similarity via `1.0 - (dist as f32 / 10000.0)` ONLY at API boundary
-- Internal: everything is u8, u16, u32, u64
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           LAYER 1: ADDRESSING                               │
+│                              (always int8)                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  prefix:slot (u8:u8) → array index → 3-5 cycles                            │
+│  Works everywhere: embedded, WASM, Raspberry Pi, phone                     │
+│  NO runtime detection needed                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       LAYER 2: COMPUTE (adaptive)                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  AVX-512 (Railway, modern Xeon):                                           │
+│    → 8×64-bit popcount per instruction                                     │
+│    → 10K-bit fingerprint in 20 ops                                         │
+│    → ~2ns per comparison                                                   │
+│                                                                             │
+│  AVX2 (NUC 14, most laptops):                                              │
+│    → 4×64-bit via _mm256 intrinsics                                        │
+│    → ~4ns per comparison                                                   │
+│                                                                             │
+│  Fallback (WASM, ARM, old x86):                                            │
+│    → u64::count_ones() loop                                                │
+│    → ~50ns per comparison                                                  │
+│    → Still works, just slower                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-### Array Indexing Over HashMap
+| What | How | Why |
+|------|-----|-----|
+| Address decode | `u8` shift/mask | Universal, no feature detect |
+| Bucket lookup | `[prefix][slot]` | Array index, no hash |
+| Hamming distance | `#[cfg(target_feature)]` | Best available SIMD |
+| Batch compare | AVX-512 if available | 8 fingerprints parallel |
+| HDR cascade | Popcount at each level | Adaptive precision |
+
+### Addressing: ALWAYS Simple (int8)
 
 ```rust
-// WRONG
-let result = hashmap.get(&key);  // 30-100 cycles
+// This runs everywhere, no feature detection
+#[inline(always)]
+fn lookup(addr: u16) -> (u8, u8) {
+    ((addr >> 8) as u8, (addr & 0xFF) as u8)
+}
 
-// RIGHT
+// Array indexing, not HashMap
 let prefix = (addr >> 8) as usize;
 let slot = (addr & 0xFF) as usize;
-let result = &arrays[prefix][slot];  // 3-5 cycles
+let result = &arrays[prefix][slot];  // 3-5 cycles, not 30-100
+```
+
+### Compute: ADAPTIVE (use best available)
+
+```rust
+// AVX-512 path (Railway, Xeon): ~2ns per candidate
+#[cfg(target_feature = "avx512vpopcntdq")]
+#[target_feature(enable = "avx512f,avx512vpopcntdq")]
+unsafe fn hamming_batch_8(query: &[u64; 156], candidates: &[[u64; 156]; 8]) -> [u32; 8] {
+    use std::arch::x86_64::*;
+    // 8 fingerprints in parallel, 20 AVX-512 ops each
+    // ...
+}
+
+// AVX2 path (most laptops, NUC): ~4ns per candidate
+#[cfg(all(target_feature = "avx2", not(target_feature = "avx512vpopcntdq")))]
+fn hamming_batch_4(query: &[u64; 156], candidates: &[[u64; 156]; 4]) -> [u32; 4] {
+    // 4 fingerprints in parallel
+    // ...
+}
+
+// Fallback (WASM, ARM, old x86): ~50ns but works everywhere
+#[cfg(not(any(target_feature = "avx2", target_feature = "avx512vpopcntdq")))]
+fn hamming_scalar(a: &[u64; 156], b: &[u64; 156]) -> u32 {
+    a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
+}
+```
+
+### Float Only at API Boundary
+
+```rust
+// Internal: pure integer
+let distance: u32 = hamming(a, b);  // 0-10000
+
+// API boundary only: convert for user
+let similarity: f32 = 1.0 - (distance as f32 / 10000.0);  // 0.0-1.0
 ```
 
 ### Fluid Zone is Context Selector
