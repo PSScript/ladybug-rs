@@ -20,5 +20,8 @@ pub mod meta_resonance;
 #[cfg(feature = "spo")]
 pub mod nsm_substrate;
 
+#[cfg(feature = "spo")]
+pub mod codebook_training;
+
 #[cfg(feature = "compress")]
 pub mod compress;
