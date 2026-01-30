@@ -7,7 +7,7 @@
 //! Cognitive Frameworks:
 //! - NARS: Non-Axiomatic Reasoning System
 //! - ACT-R: Adaptive Control of Thought
-//! - RL: Reinforcement Learning
+//! - RL: Reinforcement Learning (with causal extensions)
 //! - Causality: Pearl's do-calculus
 //! - Qualia: Affect channels
 //! - Rung: Abstraction ladder
@@ -20,6 +20,10 @@
 //! Tree Addressing:
 //! - 256-way branching for hierarchical navigation
 //! - Like LDAP Distinguished Names
+//!
+//! NEW: Causal RL Integration
+//! - rl_ops: Causal Q-learning with intervention/counterfactual reasoning
+//! - causal_ops: Full do-calculus as fingerprint operations
 
 pub mod moment;
 pub mod session;
@@ -29,6 +33,8 @@ pub mod concept;
 pub mod cam_ops;
 pub mod cognitive_frameworks;
 pub mod quantum_ops;
+pub mod rl_ops;
+pub mod causal_ops;
 
 pub use moment::{Moment, MomentType, Qualia, MomentBuilder};
 pub use session::{LearningSession, SessionState, SessionPhase};
@@ -45,9 +51,9 @@ pub use cognitive_frameworks::{
     TruthValue, NarsCopula, NarsInference, NarsStatement,
     // ACT-R
     ActrBuffer, ActrChunk, ActrProduction,
-    // RL
+    // RL (basic)
     StateAction, QValue, RlAgent,
-    // Causality
+    // Causality (basic)
     CausalRelation, CausalNode, CausalEdge, DoOperator, Counterfactual,
     // Qualia
     QualiaChannel, QualiaState,
@@ -65,4 +71,13 @@ pub use quantum_ops::{
     NarsInferenceOp, ActrRetrievalOp, RlValueOp, CausalDoOp, QualiaShiftOp, RungLadderOp,
     // Operator algebra
     ComposedOp, SumOp, TensorOp,
+};
+
+// NEW: Causal RL integration (wired to search module)
+pub use rl_ops::{
+    RlOp, CausalRlAgent,
+    ActionExplanation, AlternativeAction, CausalChainLink,
+};
+pub use causal_ops::{
+    CausalOp, CausalEngine, GraphEdge, CausalEdgeType,
 };
