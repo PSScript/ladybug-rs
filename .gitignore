@@ -9,3 +9,6 @@ __pycache__/
 *.so
 *.dylib
 *.dll
+
+# Session transcripts (local only)
+.claude/
