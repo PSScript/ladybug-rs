@@ -1,4 +1,4 @@
-//! Search module - Alien Magic Vector Search
+//! Search module - Alien Magic Vector Search + Causal Reasoning
 //!
 //! This module provides a search API that looks like float vector search
 //! (Faiss, Annoy, etc.) but runs on pure integer SIMD operations.
@@ -9,29 +9,33 @@
 //! - **Mexican Hat**: Discrimination with excitation and inhibition zones
 //! - **Rolling σ**: Window-based coherence detection
 //! - **A⊗B⊗B=A**: O(1) direct retrieval via XOR unbinding
+//! - **Causal Search**: Three rungs (correlate, intervene, counterfact)
 //!
 //! # Example
 //!
 //! ```ignore
-//! use ladybug::search::{AlienSearch, MexicanHat};
+//! use ladybug::search::{AlienSearch, CausalSearch, QueryMode};
 //!
-//! // Create search engine
+//! // Correlation search (looks like vector search)
 //! let mut search = AlienSearch::with_capacity(10000);
-//!
-//! // Add fingerprints (looks like adding vectors)
-//! for fp in fingerprints {
-//!     search.add(&fp.to_words());
-//! }
-//!
-//! // Search returns similarity scores (looks like cosine similarity!)
 //! let results = search.search_similarity(&query.to_words(), 10);
-//! // results: [(index, 0.95), (index, 0.91), ...]
 //!
-//! // Or use Mexican hat for discrimination
-//! let results = search.search_discriminate(&query.to_words(), 10);
+//! // Causal search (three rungs)
+//! let mut causal = CausalSearch::new();
+//!
+//! // Rung 1: What correlates?
+//! let correlates = causal.query_correlates(&x, 10);
+//!
+//! // Rung 2: What happens if I do this?
+//! causal.store_intervention(&state, &action, &outcome, 1.0);
+//! let outcomes = causal.query_outcome(&state, &action);
+//!
+//! // Rung 3: What would have happened?
+//! let counterfactuals = causal.query_counterfactual(&state, &alt_action);
 //! ```
 
 pub mod hdr_cascade;
+pub mod causal;
 
 pub use hdr_cascade::{
     // Core operations
@@ -61,4 +65,23 @@ pub use hdr_cascade::{
     
     // Fingerprint extension trait
     FingerprintSearch,
+};
+
+pub use causal::{
+    // Verbs
+    CausalVerbs,
+    
+    // Edge types
+    EdgeType,
+    CausalEdge,
+    
+    // Rung stores
+    CorrelationStore,
+    InterventionStore,
+    CounterfactualStore,
+    
+    // Unified API
+    QueryMode,
+    CausalResult,
+    CausalSearch,
 };
