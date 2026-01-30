@@ -49,8 +49,8 @@ fn main() {
     // Stats
     let stats = bind_space.stats();
     println!("\nBind space stats:");
-    println!("  Surface occupied: {}", stats.surface_occupied);
-    println!("  Node occupied: {}", stats.nodes_occupied);
+    println!("  Surface count: {}", stats.surface_count);
+    println!("  Node count: {}", stats.node_count);
     println!("  Edge count: {}", stats.edge_count);
 
     // Direct array indexing: 3-5 cycles

@@ -34,7 +34,7 @@ fn main() {
     // Access bind space directly
     let bind_space = cog.bind_space();
     println!("\nBind space initialized with {} surface ops",
-        bind_space.stats().surface_occupied);
+        bind_space.stats().surface_count);
 
     println!("\n✓ Cognitive graph operations working!");
 }
