@@ -23,5 +23,8 @@ pub mod nsm_substrate;
 #[cfg(feature = "spo")]
 pub mod codebook_training;
 
+#[cfg(feature = "spo")]
+pub mod deepnsm_integration;
+
 #[cfg(feature = "compress")]
 pub mod compress;
