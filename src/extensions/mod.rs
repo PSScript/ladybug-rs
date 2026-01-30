@@ -17,5 +17,8 @@ pub mod context_crystal;
 #[cfg(feature = "spo")]
 pub mod meta_resonance;
 
+#[cfg(feature = "spo")]
+pub mod nsm_substrate;
+
 #[cfg(feature = "compress")]
 pub mod compress;
