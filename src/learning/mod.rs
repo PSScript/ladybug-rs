@@ -11,6 +11,15 @@
 //! - Causality: Pearl's do-calculus
 //! - Qualia: Affect channels
 //! - Rung: Abstraction ladder
+//!
+//! Quantum-Inspired:
+//! - Operators as linear mappings on fingerprint space
+//! - Non-commutative algebra
+//! - Measurement as collapse to eigenstates
+//!
+//! Tree Addressing:
+//! - 256-way branching for hierarchical navigation
+//! - Like LDAP Distinguished Names
 
 pub mod moment;
 pub mod session;
@@ -19,6 +28,7 @@ pub mod resonance;
 pub mod concept;
 pub mod cam_ops;
 pub mod cognitive_frameworks;
+pub mod quantum_ops;
 
 pub use moment::{Moment, MomentType, Qualia, MomentBuilder};
 pub use session::{LearningSession, SessionState, SessionPhase};
@@ -43,4 +53,16 @@ pub use cognitive_frameworks::{
     QualiaChannel, QualiaState,
     // Rung
     Rung, RungClassifier,
+};
+pub use quantum_ops::{
+    // Tree addressing
+    TreeAddr, tree_branches,
+    // Quantum operator trait
+    QuantumOp,
+    // Core operators
+    IdentityOp, NotOp, BindOp, PermuteOp, ProjectOp, HadamardOp, MeasureOp, TimeEvolutionOp,
+    // Cognitive operators
+    NarsInferenceOp, ActrRetrievalOp, RlValueOp, CausalDoOp, QualiaShiftOp, RungLadderOp,
+    // Operator algebra
+    ComposedOp, SumOp, TensorOp,
 };
