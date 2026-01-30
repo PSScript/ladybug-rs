@@ -13,3 +13,13 @@ pub use traversal::Traversal;
 pub use cognitive::{
     Verb, VerbCategory, CogNode, NodeType, CogEdge, CogGraph,
 };
+
+pub mod avx_engine;
+pub use avx_engine::{
+    FingerprintGraph,
+    QueryMatch,
+    hamming_distance,
+    batched_query,
+    avx512_available,
+    simd_info,
+};
