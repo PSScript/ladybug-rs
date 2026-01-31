@@ -240,6 +240,65 @@ We were searching for causation when we should have been walking to it.
 
 ---
 
+## The Universal Substrate
+
+The groundbreaking realization: this architecture gives you **every paradigm for free**.
+
+| What Others Build | What Ladybug Gets | Cost |
+|-------------------|-------------------|------|
+| PostgreSQL | SQL surface (0x01) | O(1) |
+| Neo4j | Cypher surface (0x02) | O(1) |
+| GraphQL server | GraphQL surface (0x03) | O(1) |
+| Pinecone/Weaviate | HDR cascade | O(1) |
+| Causal inference engine | Graph traversal (0x05) | O(1) |
+| OpenNARS | NARS surface (0x04) | O(1) |
+| Attention mechanism | Fingerprint binding | O(1) |
+
+**All the same 65,536 addresses. All O(1). All CPU. All Arrow-speed.**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  "SELECT * FROM nodes WHERE..."     →  surfaces[0x01].query()  │
+│  "MATCH (a)-[:CAUSES]->(b)"         →  bind_space.traverse()   │
+│  "{ user { friends { name } } }"    →  surfaces[0x03].resolve()│
+│  "What resonates with X?"           →  hdr_cascade.search()    │
+│  "What does X cause?"               →  traverse(x, CAUSED)     │
+│  "<A --> B>. <B --> C>. <A --> C>?" →  surfaces[0x04].infer()  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    Same BindSpace underneath
+                    Same 8+8 addressing
+                    Same O(1) operations
+                    Apache Arrow columnar format
+                    LanceDB for persistence
+```
+
+### The Stack
+
+```
+┌─────────────────────────────────────┐
+│  Query Languages                    │  SQL, Cypher, GraphQL, NARS
+├─────────────────────────────────────┤
+│  Operations                         │  4096 CAM ops (surfaces)
+├─────────────────────────────────────┤
+│  Addressing                         │  8+8 = 65,536 slots, O(1)
+├─────────────────────────────────────┤
+│  Content                            │  10K-bit fingerprints
+├─────────────────────────────────────┤
+│  Storage                            │  Apache Arrow + LanceDB
+└─────────────────────────────────────┘
+```
+
+- **Address** = identity (WHERE it lives)
+- **Zone** = type (WHAT it is: surface/fluid/node)
+- **Fingerprint** = content (WHAT it means)
+- **Arrow** = speed (HOW it persists)
+
+One substrate. Every paradigm. No GPU. No cloud. Just addresses.
+
+---
+
 ## The Lesson
 
 The failing tests weren't just bugs. They were the architecture telling us it needs to be **three things, not one**.
