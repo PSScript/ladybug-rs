@@ -73,63 +73,65 @@
 | #12 | Dependencies | Merge when needed |
 | #11 | Reconstructed files | ⚠️ AUDIT FIRST |
 
-### 🔴 Remaining Failures (5 tests - need crystal features)
+### 🔴 Test Failures (10 total with crystal features)
 
-These tests **require the SPO+qualia crystal** to be compiled in:
+**Run with:** `cargo test --features "spo,quantum,codebook"`
 
-```bash
-# WITHOUT crystal features = 5 failures
-cargo test
+**Results:** 173 pass, 10 fail
 
-# WITH crystal features = should pass
-cargo test --features "spo,quantum,codebook"
-```
+#### Original 5 (logic/algorithm issues)
 
-| Test | Feature Required | What It Tests |
-|------|------------------|---------------|
-| `collapse_gate` | `quantum` | Triangle collapse (consciousness gates) |
-| `causal_ops` | `spo` | CausalEngine (Pearl's 3 rungs over SPO) |
-| `quantum_ops` | `quantum` | TreeAddr (256-way branching in crystal) |
-| `cypher` | `spo` | Cypher→SPO triple translation |
-| `causal` | `spo,quantum` | SEE/DO/IMAGINE over crystal substrate |
+| Test | Error | Root Cause |
+|------|-------|------------|
+| `collapse_gate::test_sd_calculation` | `sd_spread > SD_BLOCK_THRESHOLD` | Threshold calculation logic |
+| `quantum_ops::test_permute_adjoint` | `left != right` | Permute/unpermute not inverse |
+| `cypher::test_variable_length` | `ParseFloatError` | Tokenizer can't parse number |
+| `causal_ops::test_store_query_correlation` | SPO substrate | CausalEngine query issue |
+| `causal::test_correlation_store` | `results.is_empty()` | Query returns no results |
 
-**The 5×5×5 SPO+qualia crystal** (`src/extensions/spo/`, `context_crystal.rs`) is the substrate these tests operate on. Without `--features spo,quantum`, the crystal types don't exist.
+#### New 5 (crystal initialization/serialization)
 
-**Fix:** Always test with crystal features:
-```bash
-cargo test --all-features
-# or specifically:
-cargo test --features "spo,quantum,codebook,hologram"
-```
+| Test | Error | Root Cause |
+|------|-------|------------|
+| `context_crystal::test_temporal_flow` | `popcount() == 0` | Crystal cells all zero after insert |
+| `nsm_substrate::test_codebook_initialization` | `primes.len() < 60` | Codebook not populating primes |
+| `nsm_substrate::test_learning` | `vocabulary_size() < 65` | Learning not adding to vocabulary |
+| `jina_cache::test_cache_hit_rate` | `left=4, right=5` | Off-by-one in cache hit counting |
+| `crystal_lm::test_serialize` | `unwrap() on None` | `from_bytes()` validation too strict |
+
+**Fix priority:**
+1. `jina_cache` — trivial off-by-one
+2. `crystal_lm` — serialization roundtrip
+3. `context_crystal` — crystal insert not persisting
+4. `nsm_substrate` — codebook initialization
+5. Original 5 — algorithm logic fixes
 
 ### 📋 TODO (Next Session)
 
-**Priority 1: Wire HDR to RESONATE**
+**Priority 1: Fix 10 Test Failures**
+
+Quick wins:
+- [ ] `jina_cache` — fix off-by-one in hit counting
+- [ ] `crystal_lm` — relax `from_bytes()` validation or fix test data
+
+Crystal initialization:
+- [ ] `context_crystal` — debug why insert doesn't persist to cells
+- [ ] `nsm_substrate` — ensure codebook loads 60+ primes on init
+
+Algorithm fixes:
+- [ ] `collapse_gate` — review SD threshold calculation
+- [ ] `quantum_ops` — fix permute/unpermute to be true inverses
+- [ ] `cypher` — fix tokenizer number parsing
+- [ ] `causal_ops` + `causal` — debug SPO query returning empty
+
+**Priority 2: Wire HDR to RESONATE**
 - [ ] Connect hdr_cascade.rs to CogRedis RESONATE command
 - [ ] Add similarity search through BindSpace
 
-**Priority 2: Fluid Zone Lifecycle**
+**Priority 3: Fluid Zone Lifecycle**
 - [ ] Implement TTL expiration (`tick()`)
 - [ ] Implement `crystallize()` — promote fluid to node
 - [ ] Implement `evaporate()` — demote node to fluid
-
-**Priority 3: Harvest from PR #24 (old CAM index)**
-
-Populate surface compartments from old type constants:
-
-| Surface | Slots to Add | Source |
-|---------|--------------|--------|
-| 0x08 Concepts | 7 consciousness layers | LAYER_SUBSTRATE..LAYER_META |
-| 0x09 Qualia | 12 thinking styles | STYLE_ANALYTICAL..STYLE_SPATIAL |
-
-Harvest patterns:
-- [ ] Cypher traversal API (`match_edges_from`, `match_edges_to`, `all_edges_from`)
-- [ ] LBUG file format for persistence
-- [ ] COW append pattern for fluid zone versioning
-
-**Priority 4: Verify All Tests Pass**
-- [ ] Run `cargo test --all-features` to confirm crystal tests pass
-- [ ] Add persistence layer (mmap)
 
 **Recent Commits** (PR #26):
 ```
