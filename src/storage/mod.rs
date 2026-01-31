@@ -37,6 +37,7 @@ pub mod bind_space;
 pub mod hardening;
 pub mod temporal;
 pub mod resilient;
+pub mod concurrency;
 
 #[cfg(feature = "lancedb")]
 pub use lance::{LanceStore, NodeRecord, EdgeRecord};
@@ -130,4 +131,18 @@ pub use resilient::{
     ResilientStore, ReadResult, ResilientStatus,
     // Errors
     BufferError,
+};
+
+// Concurrency exports (MVCC, memory pool, parallel execution)
+pub use concurrency::{
+    // Memory pool
+    MemoryPoolConfig, MemoryPool, MemoryGuard, MemoryPoolStats, MemoryError,
+    // MVCC
+    MvccSlot, ReadHandle, WriteIntent, WriteResult, MvccStore,
+    // Parallel execution
+    ParallelConfig, ParallelExecutor, ResultHandle, ParallelError,
+    // Query context
+    QueryContext as ConcurrentQueryContext, ConflictError,
+    // Combined store
+    ConcurrentStore, WriteConflict, ConcurrentStats,
 };
