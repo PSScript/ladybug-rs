@@ -36,6 +36,7 @@ pub mod cog_redis;
 pub mod bind_space;
 pub mod hardening;
 pub mod temporal;
+pub mod resilient;
 
 #[cfg(feature = "lancedb")]
 pub use lance::{LanceStore, NodeRecord, EdgeRecord};
@@ -111,4 +112,22 @@ pub use temporal::{
     TemporalError,
     // Full-featured CogRedis
     TemporalCogRedis, TemporalStats,
+};
+
+// Resilient exports (ReFS-like hardening)
+pub use resilient::{
+    // Config
+    ResilienceConfig,
+    // Buffer types
+    VirtualVersion, WriteState,
+    BufferedWrite, BufferedDelete, BufferedLink,
+    WriteBuffer,
+    // Dependency tracking
+    DependencyGraph,
+    // Recovery
+    RecoveryEngine, RecoveryAction,
+    // Store
+    ResilientStore, ReadResult, ResilientStatus,
+    // Errors
+    BufferError,
 };
