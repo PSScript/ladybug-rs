@@ -154,12 +154,89 @@ The addressing scheme that seemed like premature optimization is actually **the 
 
 ---
 
+## Discovery: The Infrastructure Already Exists
+
+While discussing this, we checked `bind_space.rs` and found:
+
+**The graph traversal API is already implemented.**
+
+```rust
+// src/storage/bind_space.rs
+
+// Create edge (line 775)
+pub fn link(&mut self, from: Addr, verb: Addr, to: Addr) -> usize
+
+// Query edges (lines 800-810)
+pub fn edges_out(&self, from: Addr) -> impl Iterator<Item = &BindEdge>
+pub fn edges_in(&self, to: Addr) -> impl Iterator<Item = &BindEdge>
+
+// Traverse (lines 815-850)
+pub fn traverse(&self, from: Addr, verb: Addr) -> Vec<Addr>
+pub fn traverse_reverse(&self, to: Addr, verb: Addr) -> Vec<Addr>
+pub fn traverse_n_hops(&self, start: Addr, verb: Addr, max_hops: usize) -> Vec<(usize, Addr)>
+```
+
+**The verb addresses are already defined:**
+
+```rust
+// PREFIX_VERBS = 0x07
+// Slot 0x02 = CAUSES
+
+let CAUSED: Addr = Addr(0x0702);
+```
+
+**So causal logging is literally:**
+
+```rust
+// During training
+bind_space.link(batch_addr, CAUSED, layer_addr);
+bind_space.link(layer_addr, CAUSED, output_addr);
+
+// Query: "What did rain cause?"
+let effects = bind_space.traverse(rain, CAUSED);
+
+// Query: "What caused this output?"
+let sources = bind_space.traverse_reverse(output, CAUSED);
+
+// Query: "Full causal chain, 5 hops"
+let chain = bind_space.traverse_n_hops(rain, CAUSED, 5);
+```
+
+**The edge structure exists:**
+
+```rust
+pub struct BindEdge {
+    pub from: Addr,      // Source node (0x80-0xFF:XX)
+    pub to: Addr,        // Target node (0x80-0xFF:XX)
+    pub verb: Addr,      // Verb (0x07:XX)
+    pub fingerprint: [u64; FINGERPRINT_WORDS],
+    pub weight: f32,
+}
+```
+
+**CSR indexing for O(1) lookup exists:**
+
+```rust
+edges: Vec<BindEdge>,
+edge_out: Vec<Vec<usize>>,  // from.0 -> edge indices
+edge_in: Vec<Vec<usize>>,   // to.0 -> edge indices
+```
+
+### The Confusion
+
+The `search/causal.rs` module was reinventing causal queries using fingerprint similarity (HDR cascade, ABBA unbinding) when the answer was already in `storage/bind_space.rs` — **address-based graph traversal**.
+
+We were searching for causation when we should have been walking to it.
+
+---
+
 ## Next Steps
 
-1. **Clean separation in code**: `HdrCascade`, `CausalGraph`, `WorldModel` as distinct structures
-2. **Harvest traversal API from PR #24**: `match_edges_from`, `match_edges_to`, `all_edges_from`
+1. ~~**Harvest traversal API from PR #24**~~ → Already in `bind_space.rs`!
+2. **Wire `search/causal.rs` to use `bind_space.traverse()`** instead of HDR cascade
 3. **Prototype training logger**: Hook into PyTorch/JAX gradient tape
 4. **Benchmark overhead**: Verify O(1) logging doesn't slow training significantly
+5. **Clean up**: Remove fingerprint-based causal "search" code
 
 ---
 
