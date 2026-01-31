@@ -62,14 +62,11 @@
 | Cognitive Redis commands | cog_redis.rs | ✓ Merged |
 | Wire Redis to BindSpace | cog_redis.rs | ✓ Merged (PR #25) |
 
-### 🔄 Open PRs (Cleanup Needed)
+### 🔄 Open PRs
 
 | PR | Description | Action |
 |----|-------------|--------|
-| **#21** | HDR Cascade Search | **CLOSE** - already on main |
-| #24 | 64-bit CAM index | Review alignment with 8+8 |
-| #23 | Updated exports (16 prefixes) | Close if stale |
-| #22 | Updated exports (16 prefixes) | Close if stale |
+| #24 | [REFERENCE] 64-bit CAM index | Old code for visibility - don't merge |
 | #16 | Grammar engine | Audit recovery |
 | #15 | Crystal extension | Review |
 | #14 | ARCHITECTURE.md | Review + Merge |
