@@ -75,11 +75,18 @@
 
 ### 🔴 Remaining Failures (5 tests - pre-existing)
 
-- `collapse_gate` — collapse gate logic
-- `causal_ops` — Pearl's ladder ops
-- `quantum_ops` — quantum-style operators
-- `cypher` — Cypher query handling
-- `causal` — causal inference
+These tests are **self-contained** but may need feature flags or investigation:
+
+| Test | File | Likely Issue |
+|------|------|--------------|
+| `collapse_gate` | src/cognitive/collapse_gate.rs | Triangle/GateState logic |
+| `causal_ops` | src/learning/causal_ops.rs | CausalEngine/CausalSearch |
+| `quantum_ops` | src/learning/quantum_ops.rs | TreeAddr/quantum operators |
+| `cypher` | src/storage/cypher.rs | Cypher parser/transpiler |
+| `causal` | src/search/causal.rs | Causal search (3 rungs) |
+
+**Note:** The 5×5×5 crystal (`context_crystal.rs`) is gated behind `--features spo`.
+Run with: `cargo test --features "spo,quantum"`
 
 ### 📋 TODO (Next Session)
 
