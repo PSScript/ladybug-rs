@@ -1014,3 +1014,315 @@ mod tests {
         assert!(d4 <= exact);
     }
 }
+
+// =============================================================================
+// BELICHTUNGSMESSER - Adaptive Threshold Search
+// =============================================================================
+
+/// Sample points for exposure metering (prime-spaced for max information)
+const METER_POINTS: [usize; 7] = [0, 23, 47, 78, 101, 131, 155];
+
+/// Belichtungsmesser: 7-point exposure meter using 1-bit samples
+/// Returns (mean, sd×100) - the "lighting conditions" of this comparison
+#[inline]
+pub fn belichtung_meter(query: &[u64; WORDS], candidate: &[u64; WORDS]) -> (u8, u8) {
+    let mut sum = 0u32;
+
+    // 7 strategic 1-bit samples (super cheap: 7 XOR + 7 compare)
+    for &idx in &METER_POINTS {
+        sum += ((query[idx] ^ candidate[idx]) != 0) as u32;
+    }
+
+    // For binary samples: variance = p(1-p) where p = sum/7
+    // SD = sqrt(n * p * (1-p)) / n = sqrt(p * (1-p) / n)
+    let p = sum as f32 / 7.0;
+    let variance = p * (1.0 - p);
+    let sd = (variance * 7.0).sqrt(); // Scaled for 0-1.32 range
+
+    (sum as u8, (sd * 100.0) as u8)
+}
+
+/// Quality tracker for Rubicon crossings
+#[derive(Clone, Debug)]
+pub struct QualityTracker {
+    /// Exponential moving average of quality
+    pub ema: f32,
+    /// SD trajectory history (last 4 readings)
+    pub sd_history: [u8; 4],
+    /// History index
+    pub sd_idx: usize,
+    /// Current dynamic threshold
+    pub threshold: u16,
+    /// Base threshold (learned sweet spot)
+    pub base_threshold: u16,
+}
+
+impl Default for QualityTracker {
+    fn default() -> Self {
+        Self {
+            ema: 0.5,
+            sd_history: [50; 4],
+            sd_idx: 0,
+            threshold: 2000,
+            base_threshold: 2000,
+        }
+    }
+}
+
+impl QualityTracker {
+    /// Create with initial threshold
+    pub fn new(base_threshold: u16) -> Self {
+        Self {
+            base_threshold,
+            threshold: base_threshold,
+            ..Default::default()
+        }
+    }
+
+    /// Record a meter reading and update trajectory
+    pub fn record_meter(&mut self, _mean: u8, sd: u8) {
+        self.sd_history[self.sd_idx % 4] = sd;
+        self.sd_idx += 1;
+    }
+
+    /// Calculate optimal threshold from meter reading
+    /// High SD = uncertain → widen threshold (conservative)
+    /// Low SD = confident → tighten threshold (aggressive)
+    pub fn calculate_sweet_spot(&self, mean: u8, sd: u8) -> u16 {
+        // Base threshold from mean (how different the samples are)
+        let base = match mean {
+            0..=1 => self.base_threshold / 2,      // Very similar
+            2..=3 => (self.base_threshold * 3) / 4, // Somewhat similar
+            4..=5 => self.base_threshold,           // Mixed signals
+            6..=7 => (self.base_threshold * 3) / 2, // Very different
+            _ => self.base_threshold,
+        };
+
+        // SD adjustment: higher SD → widen threshold
+        // SD range is 0-132 (scaled by 100), so sd/100 is 0-1.32
+        let sd_factor = 1.0 + (sd as f32 / 150.0);
+
+        (base as f32 * sd_factor) as u16
+    }
+
+    /// Infer trajectory and pre-adjust threshold
+    pub fn infer_trajectory(&mut self) -> i16 {
+        if self.sd_idx < 4 { return 0; }
+
+        let h = &self.sd_history;
+        // Linear slope over last 4 readings
+        let slope = (h[3] as i16 - h[0] as i16) / 3;
+
+        if slope > 10 {
+            // SD increasing → data getting noisier → widen
+            self.threshold = (self.threshold as i32 + slope as i32 * 20).min(5000) as u16;
+        } else if slope < -10 {
+            // SD decreasing → data getting consistent → tighten
+            self.threshold = (self.threshold as i32 + slope as i32 * 15).max(500) as u16;
+        }
+
+        slope
+    }
+
+    /// Update quality EMA after batch
+    pub fn update_quality(&mut self, batch_quality: f32) {
+        self.ema = 0.85 * self.ema + 0.15 * batch_quality;
+    }
+
+    /// Check if we should retreat from Rubicon
+    pub fn should_retreat(&self, current_quality: f32) -> bool {
+        current_quality < self.ema * 0.6
+    }
+}
+
+/// Rubicon-aware search with adaptive thresholds
+pub struct RubiconSearch {
+    /// The fingerprint index
+    pub index: HdrIndex,
+    /// Quality tracker
+    pub tracker: QualityTracker,
+    /// Batch size for Rubicon crossings
+    pub batch_size: usize,
+}
+
+impl RubiconSearch {
+    /// Create with capacity
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            index: HdrIndex::with_capacity(n),
+            tracker: QualityTracker::default(),
+            batch_size: 64,
+        }
+    }
+
+    /// Add a fingerprint
+    pub fn add(&mut self, fp: &[u64; WORDS]) {
+        self.index.add(fp);
+    }
+
+    /// Search with Rubicon crossings and adaptive thresholds
+    /// Returns (index, distance, quality) tuples
+    pub fn search_adaptive(
+        &mut self,
+        query: &[u64; WORDS],
+        k: usize,
+    ) -> Vec<(usize, u32)> {
+        let mut results = Vec::with_capacity(k * 2);
+        let fps = &self.index.fingerprints;
+
+        if fps.is_empty() {
+            return results;
+        }
+
+        let mut batch_start = 0;
+
+        while batch_start < fps.len() && results.len() < k * 10 {
+            // ═══════════════════════════════════════════════════════
+            // PHASE 1: Belichtungsmesser (measure before Rubicon)
+            // ═══════════════════════════════════════════════════════
+            let (mean, sd) = belichtung_meter(query, &fps[batch_start]);
+            self.tracker.record_meter(mean, sd);
+
+            // ═══════════════════════════════════════════════════════
+            // PHASE 2: Calculate sweet spot threshold
+            // ═══════════════════════════════════════════════════════
+            let dynamic_threshold = self.tracker.calculate_sweet_spot(mean, sd);
+
+            // ═══════════════════════════════════════════════════════
+            // PHASE 3: Cross Rubicon (batch processing)
+            // ═══════════════════════════════════════════════════════
+            let batch_end = (batch_start + self.batch_size).min(fps.len());
+            let mut batch_quality_sum = 0.0f32;
+            let mut batch_count = 0u32;
+
+            for i in batch_start..batch_end {
+                let dist = hamming_distance(query, &fps[i]);
+
+                if dist <= dynamic_threshold as u32 {
+                    results.push((i, dist));
+                    batch_quality_sum += 1.0 - (dist as f32 / 10000.0);
+                    batch_count += 1;
+                }
+
+                // ═══════════════════════════════════════════════════
+                // PHASE 4: Quality monitoring, retreat if needed
+                // ═══════════════════════════════════════════════════
+                if batch_count >= 8 && i > batch_start + 16 {
+                    let current_q = batch_quality_sum / batch_count as f32;
+                    if self.tracker.should_retreat(current_q) {
+                        // Quality degraded - break and re-measure
+                        break;
+                    }
+                }
+            }
+
+            // Update tracker
+            if batch_count > 0 {
+                let batch_q = batch_quality_sum / batch_count as f32;
+                self.tracker.update_quality(batch_q);
+            }
+
+            // ═══════════════════════════════════════════════════════
+            // PHASE 5: Infer trajectory, pre-adjust for next batch
+            // ═══════════════════════════════════════════════════════
+            self.tracker.infer_trajectory();
+
+            batch_start = batch_end;
+        }
+
+        // Sort by distance and take top k
+        results.sort_by_key(|&(_, d)| d);
+        results.truncate(k);
+        results
+    }
+
+    /// Get current quality EMA
+    pub fn quality(&self) -> f32 {
+        self.tracker.ema
+    }
+
+    /// Get current dynamic threshold
+    pub fn threshold(&self) -> u16 {
+        self.tracker.threshold
+    }
+}
+
+#[cfg(test)]
+mod belichtung_tests {
+    use super::*;
+
+    fn random_fingerprint() -> [u64; WORDS] {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::time::SystemTime;
+
+        let mut fp = [0u64; WORDS];
+        let seed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        for i in 0..WORDS {
+            let mut hasher = DefaultHasher::new();
+            (seed, i).hash(&mut hasher);
+            fp[i] = hasher.finish();
+        }
+        fp
+    }
+
+    #[test]
+    fn test_belichtung_meter() {
+        let a = [0u64; WORDS];
+        let b = [0u64; WORDS];
+
+        // Identical → mean=0, sd=0
+        let (mean, sd) = belichtung_meter(&a, &b);
+        assert_eq!(mean, 0);
+        assert_eq!(sd, 0);
+
+        // All different at sample points
+        let mut c = [0u64; WORDS];
+        for &idx in &METER_POINTS {
+            c[idx] = 1;
+        }
+        let (mean, sd) = belichtung_meter(&a, &c);
+        assert_eq!(mean, 7);
+        assert_eq!(sd, 0); // All same (all 1s) → no variance
+    }
+
+    #[test]
+    fn test_quality_tracker() {
+        let mut tracker = QualityTracker::new(2000);
+
+        // Simulate decreasing SD (data getting more consistent)
+        tracker.record_meter(3, 80);
+        tracker.record_meter(3, 60);
+        tracker.record_meter(3, 45);
+        tracker.record_meter(3, 30);
+
+        let slope = tracker.infer_trajectory();
+        assert!(slope < 0); // Negative slope = SD decreasing
+
+        // Threshold should tighten
+        assert!(tracker.threshold < 2000);
+    }
+
+    #[test]
+    fn test_rubicon_search() {
+        let mut search = RubiconSearch::with_capacity(100);
+
+        // Add fingerprints
+        let fps: Vec<_> = (0..100).map(|_| random_fingerprint()).collect();
+        for fp in &fps {
+            search.add(fp);
+        }
+
+        // Search should find the query
+        let results = search.search_adaptive(&fps[42], 10);
+        assert!(!results.is_empty());
+
+        // First result should be the exact match
+        assert_eq!(results[0].0, 42);
+        assert_eq!(results[0].1, 0);
+    }
+}
