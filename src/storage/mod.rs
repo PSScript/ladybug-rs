@@ -41,6 +41,8 @@ pub mod concurrency;
 pub mod snapshots;
 pub mod corpus;
 pub mod service;
+pub mod substrate;
+pub mod redis_adapter;
 
 #[cfg(feature = "lancedb")]
 pub use lance::{LanceStore, NodeRecord, EdgeRecord};
@@ -198,4 +200,28 @@ pub use service::{
     AVX512_RUSTFLAGS, DOCKER_BUILD_CMD,
     // Errors
     ServiceError,
+};
+
+// Substrate exports (unified interface DTO)
+pub use substrate::{
+    // Configuration
+    SubstrateConfig,
+    // Node and edge types
+    SubstrateNode, SubstrateEdge,
+    // Write operations
+    WriteOp, WriteBuffer as SubstrateWriteBuffer,
+    // Statistics
+    SubstrateStats,
+    // Main interface
+    Substrate,
+};
+
+// Redis Adapter exports (Redis syntax interface)
+pub use redis_adapter::{
+    // Result types
+    RedisResult, NodeResult, SearchHit, EdgeResult, CamResult,
+    // Command types
+    RedisCommand, SetOptions as RedisSetOptions, DeleteMode,
+    // Main adapter
+    RedisAdapter,
 };
