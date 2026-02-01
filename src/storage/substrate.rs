@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use super::bind_space::{BindSpace, BindNode, Addr, FINGERPRINT_WORDS, hamming_distance};
 use super::cog_redis::{CogAddr, Tier};
+use crate::search::HdrIndex;
 
 // =============================================================================
 // CONFIGURATION
@@ -393,6 +394,12 @@ pub struct Substrate {
     /// Hot cache (BindSpace) - SINGLE source of hot data
     bind_space: RwLock<BindSpace>,
 
+    /// HDR cascade index for O(log n) similarity search
+    hdr_index: RwLock<HdrIndex>,
+
+    /// Address mapping: HdrIndex index → CogAddr
+    hdr_addrs: RwLock<Vec<CogAddr>>,
+
     /// Fluid zone TTL tracker
     fluid_tracker: RwLock<FluidTracker>,
 
@@ -416,10 +423,15 @@ impl Substrate {
     /// Create a new substrate
     pub fn new(config: SubstrateConfig) -> Self {
         let write_buffer = WriteBuffer::new(config.write_buffer_size);
+        // Pre-allocate HDR index for max hot nodes
+        let hdr_index = HdrIndex::with_capacity(config.max_hot_nodes);
+        let hdr_addrs = Vec::with_capacity(config.max_hot_nodes);
 
         Self {
             config,
             bind_space: RwLock::new(BindSpace::new()),
+            hdr_index: RwLock::new(hdr_index),
+            hdr_addrs: RwLock::new(hdr_addrs),
             fluid_tracker: RwLock::new(FluidTracker::new()),
             write_buffer: Mutex::new(write_buffer),
             next_fluid_slot: AtomicU64::new(0x1000), // Start at 0x10:00
@@ -524,8 +536,17 @@ impl Substrate {
     pub fn write(&self, fingerprint: [u64; FINGERPRINT_WORDS]) -> CogAddr {
         let mut bind_space = self.bind_space.write().unwrap();
         let addr = bind_space.write(fingerprint);
+        let cog_addr = CogAddr::from(addr.0);
 
-        let node = SubstrateNode::new(CogAddr::from(addr.0), fingerprint);
+        // Add to HDR index for fast similarity search
+        {
+            let mut hdr = self.hdr_index.write().unwrap();
+            let mut addrs = self.hdr_addrs.write().unwrap();
+            hdr.add(&fingerprint);
+            addrs.push(cog_addr);
+        }
+
+        let node = SubstrateNode::new(cog_addr, fingerprint);
 
         // Queue for Lance
         let mut buffer = self.write_buffer.lock().unwrap();
@@ -540,15 +561,24 @@ impl Substrate {
             self.flush_sync();
         }
 
-        CogAddr::from(addr.0)
+        cog_addr
     }
 
     /// Write a node with label to node space
     pub fn write_labeled(&self, fingerprint: [u64; FINGERPRINT_WORDS], label: &str) -> CogAddr {
         let mut bind_space = self.bind_space.write().unwrap();
         let addr = bind_space.write_labeled(fingerprint, label);
+        let cog_addr = CogAddr::from(addr.0);
 
-        let node = SubstrateNode::new(CogAddr::from(addr.0), fingerprint)
+        // Add to HDR index for fast similarity search
+        {
+            let mut hdr = self.hdr_index.write().unwrap();
+            let mut addrs = self.hdr_addrs.write().unwrap();
+            hdr.add(&fingerprint);
+            addrs.push(cog_addr);
+        }
+
+        let node = SubstrateNode::new(cog_addr, fingerprint)
             .with_label(label);
 
         // Queue for Lance
@@ -558,7 +588,7 @@ impl Substrate {
         self.stats.hot_nodes.fetch_add(1, Ordering::Relaxed);
         self.stats.pending_writes.fetch_add(1, Ordering::Relaxed);
 
-        CogAddr::from(addr.0)
+        cog_addr
     }
 
     /// Write to fluid zone (0x10-0x7F) with TTL
@@ -704,28 +734,65 @@ impl Substrate {
     // SEARCH OPERATIONS
     // =========================================================================
 
-    /// Search for similar nodes in node space
-    /// TODO: Integrate HdrIndex for O(log n) performance
+    /// Search for similar nodes using HDR cascade for O(log n) performance
+    ///
+    /// Uses hierarchical filtering:
+    /// - Level 0: 1-bit sketch (which chunks differ?)
+    /// - Level 1: 4-bit sketch (how much per chunk?)
+    /// - Level 2: 8-bit sketch (precise per chunk)
+    /// - Level 3: Full popcount (exact distance)
+    ///
+    /// ~90% filtered at each level = ~7ns per candidate vs ~100ns for float cosine
+    /// Falls back to full scan if HDR returns insufficient results.
     pub fn search(&self, query_fp: &[u64; FINGERPRINT_WORDS], k: usize, threshold: f32) -> Vec<(CogAddr, u32, f32)> {
-        let bind_space = self.bind_space.read().unwrap();
-        let mut results = Vec::with_capacity(k * 2);
         let max_distance = ((1.0 - threshold) * 10000.0) as u32;
 
-        // Scan node space (0x80-0xFF)
-        for prefix in 0x80..=0xFF_u8 {
-            for slot in 0..=255u8 {
-                let addr = Addr::new(prefix, slot);
-                if let Some(node) = bind_space.read(addr) {
-                    let dist = hamming_distance(query_fp, &node.fingerprint);
-                    if dist <= max_distance {
+        // First try HDR cascade for fast search
+        let mut results = {
+            let hdr = self.hdr_index.read().unwrap();
+            let addrs = self.hdr_addrs.read().unwrap();
+
+            // Use HDR cascade to find candidates (request more than k for filtering)
+            let candidates = hdr.search(query_fp, k * 10);
+
+            // Map indices back to addresses and filter by threshold
+            let res: Vec<(CogAddr, u32, f32)> = candidates
+                .into_iter()
+                .filter_map(|(idx, dist)| {
+                    if dist <= max_distance && idx < addrs.len() {
+                        let addr = addrs[idx];
                         let sim = 1.0 - (dist as f32 / 10000.0);
-                        results.push((CogAddr::from_parts(prefix, slot), dist, sim));
+                        Some((addr, dist, sim))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            res
+        };
+
+        // If HDR didn't find enough results, fall back to full scan
+        // This handles cases where thresholds are too strict or index is small
+        if results.len() < k {
+            let bind_space = self.bind_space.read().unwrap();
+            results.clear();
+
+            // Scan node space (0x80-0xFF)
+            for prefix in 0x80..=0xFF_u8 {
+                for slot in 0..=255u8 {
+                    let addr = Addr::new(prefix, slot);
+                    if let Some(node) = bind_space.read(addr) {
+                        let dist = hamming_distance(query_fp, &node.fingerprint);
+                        if dist <= max_distance {
+                            let sim = 1.0 - (dist as f32 / 10000.0);
+                            results.push((CogAddr::from_parts(prefix, slot), dist, sim));
+                        }
                     }
                 }
             }
         }
 
-        // Sort by distance and truncate
+        // Sort by distance and truncate to k
         results.sort_by_key(|(_, d, _)| *d);
         results.truncate(k);
 
