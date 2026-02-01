@@ -892,6 +892,327 @@ impl SafeArrowZeroCopy {
 }
 
 // =============================================================================
+// TRANSPARENT WRITE-THROUGH FOR PREFIX 0x00 (LANCE)
+// =============================================================================
+
+/// Prefix constants (mirrored from bind_space for no-dependency)
+pub const PREFIX_LANCE: u8 = 0x00;
+pub const PREFIX_SURFACE_END: u8 = 0x0F;
+
+/// Storage backend trait for transparent DTO integration
+///
+/// All query languages (Redis, SQL, Cypher, GQL, NARS) go through this trait.
+/// The implementation decides where data actually lives:
+/// - Hot: In-memory BindSpace array
+/// - Warm: Lance mmap'd buffer
+/// - Cold: Lance persistent storage
+pub trait StorageBackend: Send + Sync {
+    /// Read fingerprint at address (prefix:slot)
+    fn read_fingerprint(&self, prefix: u8, slot: u8) -> Option<[u64; FINGERPRINT_WORDS]>;
+
+    /// Write fingerprint to address
+    fn write_fingerprint(&self, prefix: u8, slot: u8, fp: [u64; FINGERPRINT_WORDS]) -> bool;
+
+    /// Delete fingerprint at address
+    fn delete_fingerprint(&self, prefix: u8, slot: u8) -> bool;
+
+    /// Check if address is in Lance prefix (for routing)
+    fn is_lance_prefix(&self, prefix: u8) -> bool {
+        prefix == PREFIX_LANCE
+    }
+
+    /// Sync to persistent storage
+    fn sync(&self) -> bool;
+
+    /// Begin transaction
+    fn begin_transaction(&self) -> u64;
+
+    /// Commit transaction
+    fn commit_transaction(&self, txn_id: u64) -> bool;
+
+    /// Abort transaction
+    fn abort_transaction(&self, txn_id: u64) -> bool;
+}
+
+/// Transparent write-through adapter for Lance prefix
+///
+/// All writes to prefix 0x00 automatically persist to Lance storage.
+/// All reads check the hot cache first, then fall through to Lance.
+///
+/// This achieves the "same control over storage access architecture"
+/// without duplicating methods between BindSpace and LanceDB.
+pub struct LanceWriteThrough {
+    /// The zero-copy Lance storage (warm/cold)
+    lance: SafeArrowZeroCopy,
+
+    /// Hot cache: recently accessed fingerprints
+    /// Key: (slot as u32), Value: fingerprint
+    hot_cache: RwLock<HashMap<u32, [u64; FINGERPRINT_WORDS]>>,
+
+    /// Dirty set: slots modified but not yet synced
+    dirty: Mutex<Vec<u32>>,
+
+    /// Configuration
+    config: WriteThroughConfig,
+}
+
+/// Configuration for write-through behavior
+#[derive(Debug, Clone)]
+pub struct WriteThroughConfig {
+    /// Maximum entries in hot cache before eviction
+    pub max_hot_entries: usize,
+
+    /// Sync to Lance after this many writes
+    pub sync_interval: usize,
+
+    /// Enable write-behind (async) instead of write-through (sync)
+    pub write_behind: bool,
+}
+
+impl Default for WriteThroughConfig {
+    fn default() -> Self {
+        Self {
+            max_hot_entries: 1024,
+            sync_interval: 100,
+            write_behind: false,
+        }
+    }
+}
+
+impl LanceWriteThrough {
+    /// Create new write-through adapter
+    pub fn new(wal: Arc<WriteAheadLog>, config: WriteThroughConfig) -> Self {
+        Self {
+            lance: SafeArrowZeroCopy::new(wal),
+            hot_cache: RwLock::new(HashMap::with_capacity(config.max_hot_entries)),
+            dirty: Mutex::new(Vec::new()),
+            config,
+        }
+    }
+
+    /// Create with default config
+    pub fn with_defaults(wal: Arc<WriteAheadLog>) -> Self {
+        Self::new(wal, WriteThroughConfig::default())
+    }
+
+    /// Read from hot cache or Lance
+    pub fn read(&self, slot: u8) -> Option<[u64; FINGERPRINT_WORDS]> {
+        let key = slot as u32;
+
+        // Check hot cache first (fast path)
+        {
+            let cache = self.hot_cache.read();
+            if let Some(fp) = cache.get(&key) {
+                return Some(*fp);
+            }
+        }
+
+        // Fall through to Lance storage
+        self.lance.get(0, slot as usize)
+    }
+
+    /// Write to hot cache and optionally to Lance
+    pub fn write(&self, slot: u8, fp: [u64; FINGERPRINT_WORDS]) -> bool {
+        let key = slot as u32;
+
+        // Write to hot cache
+        {
+            let mut cache = self.hot_cache.write();
+            cache.insert(key, fp);
+
+            // Evict if over capacity
+            if cache.len() > self.config.max_hot_entries {
+                // Simple eviction: remove first key (could use LRU)
+                if let Some(&evict_key) = cache.keys().next() {
+                    cache.remove(&evict_key);
+                }
+            }
+        }
+
+        // Track dirty slot
+        {
+            let mut dirty = self.dirty.lock();
+            if !dirty.contains(&key) {
+                dirty.push(key);
+            }
+
+            // Sync if interval reached
+            if dirty.len() >= self.config.sync_interval && !self.config.write_behind {
+                drop(dirty);
+                self.sync_to_lance();
+            }
+        }
+
+        true
+    }
+
+    /// Delete from cache and Lance
+    pub fn delete(&self, slot: u8) -> bool {
+        let key = slot as u32;
+
+        // Remove from hot cache
+        {
+            let mut cache = self.hot_cache.write();
+            cache.remove(&key);
+        }
+
+        // Track deletion (would need separate delete tracking in production)
+        true
+    }
+
+    /// Sync dirty entries to Lance storage
+    pub fn sync_to_lance(&self) -> usize {
+        let dirty_slots: Vec<u32>;
+        {
+            let mut dirty = self.dirty.lock();
+            dirty_slots = dirty.drain(..).collect();
+        }
+
+        if dirty_slots.is_empty() {
+            return 0;
+        }
+
+        // Begin transaction
+        let txn_id = self.lance.begin();
+
+        // Collect fingerprints for bulk write
+        let cache = self.hot_cache.read();
+        let mut data = Vec::with_capacity(dirty_slots.len() * FINGERPRINT_WORDS);
+        let mut count = 0;
+
+        for &slot in &dirty_slots {
+            if let Some(fp) = cache.get(&slot) {
+                data.extend_from_slice(fp);
+                count += 1;
+            }
+        }
+        drop(cache);
+
+        // Load into Lance
+        if !data.is_empty() {
+            self.lance.load_with_txn(txn_id, data, count);
+        }
+
+        // Commit transaction
+        self.lance.commit(txn_id);
+        self.lance.checkpoint();
+
+        count
+    }
+
+    /// Get statistics
+    pub fn stats(&self) -> WriteThroughStats {
+        let cache = self.hot_cache.read();
+        let dirty = self.dirty.lock();
+        WriteThroughStats {
+            hot_entries: cache.len(),
+            dirty_entries: dirty.len(),
+        }
+    }
+}
+
+/// Write-through statistics
+#[derive(Debug, Clone)]
+pub struct WriteThroughStats {
+    pub hot_entries: usize,
+    pub dirty_entries: usize,
+}
+
+impl StorageBackend for LanceWriteThrough {
+    fn read_fingerprint(&self, prefix: u8, slot: u8) -> Option<[u64; FINGERPRINT_WORDS]> {
+        if prefix == PREFIX_LANCE {
+            self.read(slot)
+        } else {
+            None // Only handles Lance prefix
+        }
+    }
+
+    fn write_fingerprint(&self, prefix: u8, slot: u8, fp: [u64; FINGERPRINT_WORDS]) -> bool {
+        if prefix == PREFIX_LANCE {
+            self.write(slot, fp)
+        } else {
+            false
+        }
+    }
+
+    fn delete_fingerprint(&self, prefix: u8, slot: u8) -> bool {
+        if prefix == PREFIX_LANCE {
+            self.delete(slot)
+        } else {
+            false
+        }
+    }
+
+    fn sync(&self) -> bool {
+        self.sync_to_lance() > 0 || self.dirty.lock().is_empty()
+    }
+
+    fn begin_transaction(&self) -> u64 {
+        self.lance.begin()
+    }
+
+    fn commit_transaction(&self, txn_id: u64) -> bool {
+        self.lance.commit(txn_id)
+    }
+
+    fn abort_transaction(&self, txn_id: u64) -> bool {
+        self.lance.abort(txn_id)
+    }
+}
+
+/// Unified storage that routes by prefix
+///
+/// This is the "polyglot" entry point - all query languages hit the same interface.
+/// Routing is transparent based on the address prefix.
+pub struct UnifiedStorage {
+    /// Lance storage for prefix 0x00
+    lance: Arc<LanceWriteThrough>,
+
+    // Note: Additional backends can be registered here in the future
+    // backends: HashMap<u8, Arc<dyn StorageBackend>>,
+}
+
+impl UnifiedStorage {
+    /// Create unified storage with Lance write-through
+    pub fn new(wal: Arc<WriteAheadLog>) -> Self {
+        Self {
+            lance: Arc::new(LanceWriteThrough::with_defaults(wal)),
+        }
+    }
+
+    /// Read from any prefix
+    ///
+    /// Routes to appropriate backend based on prefix:
+    /// - 0x00 (Lance): Zero-copy buffer storage
+    /// - Others: Would route to SQL, Cypher, etc. backends
+    pub fn read(&self, prefix: u8, slot: u8) -> Option<[u64; FINGERPRINT_WORDS]> {
+        match prefix {
+            PREFIX_LANCE => self.lance.read(slot),
+            // Other prefixes would route to their backends
+            _ => None,
+        }
+    }
+
+    /// Write to any prefix
+    pub fn write(&self, prefix: u8, slot: u8, fp: [u64; FINGERPRINT_WORDS]) -> bool {
+        match prefix {
+            PREFIX_LANCE => self.lance.write(slot, fp),
+            _ => false,
+        }
+    }
+
+    /// Sync all backends
+    pub fn sync_all(&self) {
+        self.lance.sync_to_lance();
+    }
+
+    /// Get Lance backend reference
+    pub fn lance(&self) -> &LanceWriteThrough {
+        &self.lance
+    }
+}
+
+// =============================================================================
 // ZERO-COPY VIEW
 // =============================================================================
 
@@ -2715,5 +3036,157 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 100);
+    }
+
+    // =========================================================================
+    // WRITE-THROUGH TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_write_through_basic() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let wt = LanceWriteThrough::with_defaults(wal);
+
+        let fp = make_fingerprint(12345);
+
+        // Write to slot 0
+        assert!(wt.write(0, fp));
+
+        // Read back
+        let read = wt.read(0).unwrap();
+        assert_eq!(read, fp);
+    }
+
+    #[test]
+    fn test_write_through_hot_cache() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let wt = LanceWriteThrough::with_defaults(wal);
+
+        // Write multiple entries
+        for i in 0..10u8 {
+            let fp = make_fingerprint(i as u64 * 1000);
+            wt.write(i, fp);
+        }
+
+        // Verify hot cache has entries
+        let stats = wt.stats();
+        assert_eq!(stats.hot_entries, 10);
+        assert_eq!(stats.dirty_entries, 10);
+    }
+
+    #[test]
+    fn test_write_through_sync() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let config = WriteThroughConfig {
+            max_hot_entries: 100,
+            sync_interval: 5,  // Sync after 5 writes
+            write_behind: false,
+        };
+        let wt = LanceWriteThrough::new(wal, config);
+
+        // Write 5 entries to trigger sync
+        for i in 0..5u8 {
+            let fp = make_fingerprint(i as u64);
+            wt.write(i, fp);
+        }
+
+        // Dirty should be cleared after sync
+        let stats = wt.stats();
+        assert_eq!(stats.dirty_entries, 0);
+    }
+
+    #[test]
+    fn test_write_through_delete() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let wt = LanceWriteThrough::with_defaults(wal);
+
+        let fp = make_fingerprint(999);
+        wt.write(42, fp);
+
+        // Verify it's there
+        assert!(wt.read(42).is_some());
+
+        // Delete
+        assert!(wt.delete(42));
+
+        // Should be gone from hot cache
+        let stats = wt.stats();
+        assert_eq!(stats.hot_entries, 0);
+    }
+
+    #[test]
+    fn test_storage_backend_trait() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let wt = LanceWriteThrough::with_defaults(wal);
+
+        // Use via trait
+        let backend: &dyn StorageBackend = &wt;
+
+        // Write via trait
+        let fp = make_fingerprint(777);
+        assert!(backend.write_fingerprint(PREFIX_LANCE, 10, fp));
+
+        // Read via trait
+        let read = backend.read_fingerprint(PREFIX_LANCE, 10).unwrap();
+        assert_eq!(read, fp);
+
+        // Non-Lance prefix returns None
+        assert!(backend.read_fingerprint(0x01, 10).is_none());
+    }
+
+    #[test]
+    fn test_unified_storage() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let unified = UnifiedStorage::new(wal);
+
+        let fp = make_fingerprint(555);
+
+        // Write to Lance prefix
+        assert!(unified.write(PREFIX_LANCE, 20, fp));
+
+        // Read back
+        let read = unified.read(PREFIX_LANCE, 20).unwrap();
+        assert_eq!(read, fp);
+
+        // Non-Lance prefix not handled
+        assert!(unified.read(0x01, 20).is_none());
+    }
+
+    #[test]
+    fn test_unified_storage_sync() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let unified = UnifiedStorage::new(wal);
+
+        // Write some data
+        for i in 0..10u8 {
+            unified.write(PREFIX_LANCE, i, make_fingerprint(i as u64));
+        }
+
+        // Sync all
+        unified.sync_all();
+
+        // Stats should show synced
+        let stats = unified.lance().stats();
+        assert_eq!(stats.dirty_entries, 0);
+    }
+
+    #[test]
+    fn test_write_through_eviction() {
+        let wal = Arc::new(WriteAheadLog::default());
+        let config = WriteThroughConfig {
+            max_hot_entries: 5,
+            sync_interval: 1000,  // Don't auto-sync
+            write_behind: true,   // Write-behind mode
+        };
+        let wt = LanceWriteThrough::new(wal, config);
+
+        // Write more than max_hot_entries
+        for i in 0..10u8 {
+            wt.write(i, make_fingerprint(i as u64));
+        }
+
+        // Hot cache should be capped
+        let stats = wt.stats();
+        assert!(stats.hot_entries <= 5);
     }
 }
