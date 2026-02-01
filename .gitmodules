@@ -1,0 +1,6 @@
+[submodule "vendor/lancedb"]
+	path = vendor/lancedb
+	url = https://github.com/AdaWorldAPI/lancedb.git
+[submodule "vendor/lance"]
+	path = vendor/lance
+	url = https://github.com/AdaWorldAPI/lance.git

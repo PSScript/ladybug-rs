@@ -60,25 +60,36 @@ pub use hdr_cascade::{
     sketch_1bit_sum,
     sketch_4bit_sum,
     sketch_8bit_sum,
-    
+
     // Mexican hat
     MexicanHat,
-    
+
     // Rolling window
     RollingWindow,
-    
+
     // HDR index
     HdrIndex,
-    
+
     // Bound retrieval (A⊗B⊗B=A)
     BoundRetrieval,
-    
+
     // Unified API (the alien magic)
     SearchResult,
     AlienSearch,
-    
+
     // Fingerprint extension trait
     FingerprintSearch,
+
+    // Belichtungsmesser (adaptive threshold search)
+    belichtung_meter,
+    QualityTracker,
+    RubiconSearch,
+
+    // Voyager deep field (orthogonal superposition cleaning)
+    superposition_clean,
+    VoyagerResult,
+    SignalClass,
+    classify_signal,
 };
 
 pub use causal::{

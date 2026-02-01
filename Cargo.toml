@@ -28,6 +28,7 @@ parallel = ["rayon"]             # Parallel processing
 
 # Storage backends
 lancedb = ["lance"]              # LanceDB vector storage
+lance-zero-copy = []             # Zero-copy integration (uses Arrow buffers)
 neo4j = ["neo4rs"]               # Neo4j graph database
 redis = ["dep:redis"]            # Redis caching
 
@@ -55,6 +56,7 @@ full = [
 # Storage: LanceDB + Arrow ecosystem
 # -----------------------------------------------------------------------------
 lance = { version = "0.9", optional = true }
+# Arrow ecosystem for zero-copy buffer access
 arrow = { version = "53", features = ["ffi"] }
 arrow-array = "53"
 arrow-schema = "53"
@@ -63,6 +65,8 @@ arrow-data = "53"
 arrow-cast = "53"
 arrow-select = "53"
 parquet = { version = "53", features = ["snap", "lz4", "zstd"] }
+# Bytes crate for zero-copy buffer sharing (same as lance-io uses)
+bytes = "1.4"
 
 # -----------------------------------------------------------------------------
 # Query: DataFusion SQL engine
