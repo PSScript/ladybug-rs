@@ -25,11 +25,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::substrate::{Substrate, SubstrateConfig, SubstrateNode, SubstrateEdge};
+use super::substrate::{Substrate, SubstrateConfig};
 use super::bind_space::{FINGERPRINT_WORDS, hamming_distance};
 use super::cog_redis::{CogAddr, Tier};
-use crate::search::cognitive::QualiaVector;
-use crate::learning::cognitive_frameworks::TruthValue;
 
 // =============================================================================
 // RESULT TYPES
@@ -180,10 +178,15 @@ pub enum RedisCommand {
 /// SET command options
 #[derive(Debug, Clone, Default)]
 pub struct SetOptions {
-    pub qualia: Option<QualiaVector>,
-    pub truth: Option<TruthValue>,
+    /// Qualia index (0-255, neutral=128)
+    pub qidx: Option<u8>,
+    /// Truth value (frequency, confidence) as tuple
+    pub truth: Option<(f32, f32)>,
+    /// Time-to-live for fluid zone entries
     pub ttl: Option<Duration>,
+    /// If true, promote directly to node space
     pub promote: bool,
+    /// Optional label for the node
     pub label: Option<String>,
 }
 
@@ -514,14 +517,36 @@ impl RedisAdapter {
         RedisResult::Array(array)
     }
 
-    fn cmd_crystallize(&mut self, _addr: &str) -> RedisResult {
-        // Would promote from fluid to node
-        RedisResult::Error("CRYSTALLIZE not yet implemented".to_string())
+    fn cmd_crystallize(&mut self, addr_str: &str) -> RedisResult {
+        let addr = match self.resolve_key(addr_str) {
+            Some(a) => a,
+            None => return RedisResult::Error("Address not found".to_string()),
+        };
+
+        if !addr.is_fluid() {
+            return RedisResult::Error("Address not in fluid zone".to_string());
+        }
+
+        match self.substrate.crystallize(addr) {
+            Some(new_addr) => RedisResult::Addr(new_addr),
+            None => RedisResult::Error("Crystallize failed".to_string()),
+        }
     }
 
-    fn cmd_evaporate(&mut self, _addr: &str) -> RedisResult {
-        // Would demote from node to fluid
-        RedisResult::Error("EVAPORATE not yet implemented".to_string())
+    fn cmd_evaporate(&mut self, addr_str: &str) -> RedisResult {
+        let addr = match self.resolve_key(addr_str) {
+            Some(a) => a,
+            None => return RedisResult::Error("Address not found".to_string()),
+        };
+
+        if !addr.is_node() {
+            return RedisResult::Error("Address not in node zone".to_string());
+        }
+
+        match self.substrate.evaporate(addr, self.substrate.config().fluid_ttl) {
+            Some(new_addr) => RedisResult::Addr(new_addr),
+            None => RedisResult::Error("Evaporate failed".to_string()),
+        }
     }
 
     fn cmd_tick(&mut self) -> RedisResult {
@@ -530,28 +555,45 @@ impl RedisAdapter {
     }
 
     fn cmd_cam(&mut self, operation: &str, args: &[String]) -> RedisResult {
-        // For now, just acknowledge the CAM operation
-        // Full CAM execution requires complex context (LanceDB, codebook, etc.)
-        // which will be wired up in a later phase
-
-        // Generate fingerprints for args
-        let fps: Vec<[u64; FINGERPRINT_WORDS]> = args.iter()
-            .map(|a| self.generate_fingerprint(a))
-            .collect();
-
-        // Check if operation is known
         let op_upper = operation.to_uppercase();
-        let known_ops = [
-            "BIND", "UNBIND", "BUNDLE", "PERMUTE", "RESONATE",
-            "HAMMING", "SIMILARITY", "KNN", "ANN",
-            "DEDUCE", "ABDUCT", "INDUCE", "REVISE",
-            "SEE", "DO", "IMAGINE",
-        ];
 
-        if known_ops.contains(&op_upper.as_str()) {
-            RedisResult::String(format!("CAM {} acknowledged (args: {})", operation, args.len()))
-        } else {
-            RedisResult::Error(format!("Unknown CAM operation: {}", operation))
+        // Route to actual implementations where possible
+        match op_upper.as_str() {
+            "BIND" if args.len() >= 3 => {
+                self.cmd_bind(&args[0], &args[1], &args[2])
+            }
+            "RESONATE" if !args.is_empty() => {
+                let k = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+                self.cmd_resonate(&args[0], k)
+            }
+            "HAMMING" if args.len() >= 2 => {
+                // Compute Hamming distance between two fingerprints
+                let fp1 = self.generate_fingerprint(&args[0]);
+                let fp2 = self.generate_fingerprint(&args[1]);
+                let dist = hamming_distance(&fp1, &fp2);
+                RedisResult::Integer(dist as i64)
+            }
+            "SIMILARITY" if args.len() >= 2 => {
+                let fp1 = self.generate_fingerprint(&args[0]);
+                let fp2 = self.generate_fingerprint(&args[1]);
+                let dist = hamming_distance(&fp1, &fp2);
+                let sim = 1.0 - (dist as f64 / 10000.0);
+                RedisResult::Float(sim)
+            }
+            "POPCOUNT" if !args.is_empty() => {
+                let fp = self.generate_fingerprint(&args[0]);
+                let popcount: u32 = fp.iter().map(|w| w.count_ones()).sum();
+                RedisResult::Integer(popcount as i64)
+            }
+            // Acknowledge other known operations (not yet fully implemented)
+            "UNBIND" | "BUNDLE" | "PERMUTE" | "KNN" | "ANN" |
+            "DEDUCE" | "ABDUCT" | "INDUCE" | "REVISE" |
+            "SEE" | "DO" | "IMAGINE" => {
+                RedisResult::String(format!("CAM {} acknowledged (not fully implemented)", operation))
+            }
+            _ => {
+                RedisResult::Error(format!("Unknown CAM operation: {}", operation))
+            }
         }
     }
 

@@ -745,7 +745,36 @@ impl BindSpace {
         }
         addr
     }
-    
+
+    /// Write at specific address (for fluid zone allocation)
+    pub fn write_at(&mut self, addr: Addr, fingerprint: [u64; FINGERPRINT_WORDS]) -> bool {
+        let prefix = addr.prefix();
+        let slot = addr.slot() as usize;
+
+        // Can't write to surfaces (they're pre-initialized)
+        if prefix <= PREFIX_SURFACE_END {
+            return false;
+        }
+
+        let node = BindNode::new(fingerprint);
+
+        if prefix >= PREFIX_FLUID_START && prefix <= PREFIX_FLUID_END {
+            let chunk = (prefix - PREFIX_FLUID_START) as usize;
+            if let Some(c) = self.fluid.get_mut(chunk) {
+                c[slot] = Some(node);
+                return true;
+            }
+        } else if prefix >= PREFIX_NODE_START {
+            let chunk = (prefix - PREFIX_NODE_START) as usize;
+            if let Some(c) = self.nodes.get_mut(chunk) {
+                c[slot] = Some(node);
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Delete from address
     pub fn delete(&mut self, addr: Addr) -> Option<BindNode> {
         let prefix = addr.prefix();

@@ -1,7 +1,7 @@
 //! Substrate - Unified Interface DTO
 //!
 //! The Substrate bridges all storage layers into a single coherent interface.
-//! Lance is the source of truth, BindSpace is the hot cache.
+//! BindSpace is the hot cache, Lance (when connected) is persistent storage.
 //!
 //! # Architecture
 //!
@@ -11,55 +11,27 @@
 //! │                    (Unified Interface DTO)                                  │
 //! ├─────────────────────────────────────────────────────────────────────────────┤
 //! │                                                                             │
-//! │   Query Adapters                                                            │
-//! │   ├── RedisAdapter    (Redis syntax → Substrate ops)                       │
-//! │   ├── SqlAdapter      (SQL → DataFusion → Substrate)                       │
-//! │   └── CypherAdapter   (Cypher → Graph ops → Substrate)                     │
-//! │                                                                             │
-//! │   Hot Layer (BindSpace)                                                     │
+//! │   Hot Layer (BindSpace) - SINGLE SOURCE OF TRUTH FOR HOT DATA              │
 //! │   ├── Surface (0x00-0x0F): 4,096 CAM operations                            │
-//! │   ├── Fluid (0x10-0x7F): 28,672 working memory                             │
-//! │   └── Nodes (0x80-0xFF): 32,768 hot node cache                             │
+//! │   ├── Fluid (0x10-0x7F): 28,672 working memory with TTL                    │
+//! │   └── Nodes (0x80-0xFF): 32,768 persistent node cache                      │
 //! │                                                                             │
-//! │   Cold Layer (LanceDB)                                                      │
-//! │   ├── nodes.lance     → All nodes with fingerprints                        │
-//! │   ├── edges.lance     → All edges with weights                             │
-//! │   └── sessions.lance  → Consciousness snapshots                            │
-//! │                                                                             │
-//! │   Sync Layer                                                                │
-//! │   ├── Write-through to Lance on commit                                     │
-//! │   ├── Read from BindSpace if hot, else Lance                               │
-//! │   └── Promote hot reads, evict cold                                        │
+//! │   Lifecycle:                                                                │
+//! │   ├── write_fluid() → allocates in 0x10-0x7F with TTL                      │
+//! │   ├── tick() → expires fluid, promotes hot, demotes cold                   │
+//! │   ├── crystallize() → promotes fluid entry to node space                   │
+//! │   └── evaporate() → demotes node entry to fluid space                      │
 //! │                                                                             │
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
-//!
-//! # Usage
-//!
-//! ```ignore
-//! let substrate = Substrate::new(config).await?;
-//!
-//! // Write (goes to both BindSpace and queued for Lance)
-//! let addr = substrate.write(fingerprint, label).await?;
-//!
-//! // Read (checks BindSpace first, falls back to Lance)
-//! let node = substrate.read(addr).await?;
-//!
-//! // Search (uses HDR cascade on BindSpace, falls back to Lance ANN)
-//! let results = substrate.search(query, k).await?;
-//!
-//! // Commit (flushes pending writes to Lance)
-//! substrate.commit().await?;
-//! ```
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{RwLock, Mutex};
 use std::time::{Duration, Instant};
 
-use super::bind_space::{BindSpace, BindNode, BindEdge, Addr, FINGERPRINT_WORDS, hamming_distance};
-use super::cog_redis::{CogAddr, CogValue, CogEdge, Tier};
+use super::bind_space::{BindSpace, BindNode, Addr, FINGERPRINT_WORDS, hamming_distance};
+use super::cog_redis::{CogAddr, Tier};
 
 // =============================================================================
 // CONFIGURATION
@@ -68,7 +40,7 @@ use super::cog_redis::{CogAddr, CogValue, CogEdge, Tier};
 /// Substrate configuration
 #[derive(Debug, Clone)]
 pub struct SubstrateConfig {
-    /// Path to Lance database
+    /// Path to Lance database (for future use)
     pub lance_path: PathBuf,
     /// Maximum hot nodes in BindSpace
     pub max_hot_nodes: usize,
@@ -90,10 +62,10 @@ impl Default for SubstrateConfig {
     fn default() -> Self {
         Self {
             lance_path: PathBuf::from("./data/lance"),
-            max_hot_nodes: 32768,  // Full node space
-            fluid_ttl: Duration::from_secs(300),  // 5 minutes
+            max_hot_nodes: 32768,
+            fluid_ttl: Duration::from_secs(300),
             promotion_threshold: 10,
-            demotion_threshold: Duration::from_secs(3600),  // 1 hour
+            demotion_threshold: Duration::from_secs(3600),
             write_buffer_size: 1000,
             async_commit: true,
             cascade_levels: 4,
@@ -139,14 +111,14 @@ impl SubstrateNode {
             addr,
             fingerprint,
             label: None,
-            qidx: 128,  // Neutral qualia
+            qidx: 128,
             access_count: 0,
             last_access: Instant::now(),
             created: Instant::now(),
             ttl: None,
             lance_id: None,
             version: 1,
-            dirty: true,  // New nodes are dirty
+            dirty: true,
         }
     }
 
@@ -166,31 +138,6 @@ impl SubstrateNode {
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
         self
-    }
-
-    /// Record an access
-    pub fn touch(&mut self) {
-        self.access_count = self.access_count.saturating_add(1);
-        self.last_access = Instant::now();
-    }
-
-    /// Check if expired (for fluid zone)
-    pub fn is_expired(&self) -> bool {
-        if let Some(ttl) = self.ttl {
-            self.last_access.elapsed() > ttl
-        } else {
-            false
-        }
-    }
-
-    /// Should promote from fluid to node?
-    pub fn should_promote(&self, threshold: u32) -> bool {
-        self.ttl.is_some() && self.access_count >= threshold
-    }
-
-    /// Should demote from node to fluid?
-    pub fn should_demote(&self, threshold: Duration) -> bool {
-        self.ttl.is_none() && self.last_access.elapsed() > threshold
     }
 
     /// Popcount of fingerprint
@@ -213,7 +160,7 @@ impl SubstrateNode {
 impl From<&BindNode> for SubstrateNode {
     fn from(node: &BindNode) -> Self {
         Self {
-            addr: CogAddr::new(0),  // Will be set by caller
+            addr: CogAddr::new(0),
             fingerprint: node.fingerprint,
             label: node.label.clone(),
             qidx: node.qidx,
@@ -318,8 +265,6 @@ pub struct WriteBuffer {
     ops: Vec<WriteOp>,
     /// Maximum size before auto-flush
     max_size: usize,
-    /// Total bytes queued
-    bytes_queued: usize,
 }
 
 impl WriteBuffer {
@@ -327,11 +272,10 @@ impl WriteBuffer {
         Self {
             ops: Vec::with_capacity(max_size),
             max_size,
-            bytes_queued: 0,
         }
     }
 
-    /// Add an operation
+    /// Add an operation, returns true if buffer is full
     pub fn push(&mut self, op: WriteOp) -> bool {
         self.ops.push(op);
         self.ops.len() >= self.max_size
@@ -396,6 +340,48 @@ impl SubstrateStats {
 }
 
 // =============================================================================
+// FLUID TRACKER (TTL management for fluid zone)
+// =============================================================================
+
+/// Tracks TTL for fluid zone entries
+struct FluidTracker {
+    /// Map from address to (creation_time, ttl)
+    entries: std::collections::HashMap<u16, (Instant, Duration)>,
+}
+
+impl FluidTracker {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, addr: u16, ttl: Duration) {
+        self.entries.insert(addr, (Instant::now(), ttl));
+    }
+
+    fn remove(&mut self, addr: u16) {
+        self.entries.remove(&addr);
+    }
+
+    fn is_expired(&self, addr: u16) -> bool {
+        if let Some((created, ttl)) = self.entries.get(&addr) {
+            created.elapsed() > *ttl
+        } else {
+            false
+        }
+    }
+
+    fn expired_entries(&self) -> Vec<u16> {
+        self.entries
+            .iter()
+            .filter(|(_, (created, ttl))| created.elapsed() > *ttl)
+            .map(|(&addr, _)| addr)
+            .collect()
+    }
+}
+
+// =============================================================================
 // SUBSTRATE (The unified interface)
 // =============================================================================
 
@@ -404,20 +390,17 @@ pub struct Substrate {
     /// Configuration
     config: SubstrateConfig,
 
-    /// Hot cache (BindSpace)
+    /// Hot cache (BindSpace) - SINGLE source of hot data
     bind_space: RwLock<BindSpace>,
 
-    /// Extended hot cache for nodes beyond 64K
-    extended_nodes: RwLock<HashMap<u64, SubstrateNode>>,
-
-    /// Extended edges
-    extended_edges: RwLock<Vec<SubstrateEdge>>,
+    /// Fluid zone TTL tracker
+    fluid_tracker: RwLock<FluidTracker>,
 
     /// Write buffer (pending Lance writes)
     write_buffer: Mutex<WriteBuffer>,
 
-    /// Next extended node ID
-    next_extended_id: AtomicU64,
+    /// Next fluid zone slot (for allocation)
+    next_fluid_slot: AtomicU64,
 
     /// Version counter
     version: AtomicU64,
@@ -437,10 +420,9 @@ impl Substrate {
         Self {
             config,
             bind_space: RwLock::new(BindSpace::new()),
-            extended_nodes: RwLock::new(HashMap::new()),
-            extended_edges: RwLock::new(Vec::new()),
+            fluid_tracker: RwLock::new(FluidTracker::new()),
             write_buffer: Mutex::new(write_buffer),
-            next_extended_id: AtomicU64::new(0x10000),  // Start after 16-bit space
+            next_fluid_slot: AtomicU64::new(0x1000), // Start at 0x10:00
             version: AtomicU64::new(1),
             stats: SubstrateStats::default(),
             lance_connected: AtomicBool::new(false),
@@ -458,7 +440,6 @@ impl Substrate {
 
     /// Read a node by address
     pub fn read(&self, addr: CogAddr) -> Option<SubstrateNode> {
-        // Check hot cache first
         let bind_space = self.bind_space.read().unwrap();
         let bind_addr = Addr::from(addr.0);
 
@@ -466,28 +447,28 @@ impl Substrate {
             self.stats.hot_hits.fetch_add(1, Ordering::Relaxed);
             let mut result = SubstrateNode::from(node);
             result.addr = addr;
+
+            // Check if this is a fluid zone entry with TTL
+            if addr.is_fluid() {
+                let tracker = self.fluid_tracker.read().unwrap();
+                if tracker.is_expired(addr.0) {
+                    // Expired - return None (will be cleaned up on tick)
+                    return None;
+                }
+            }
+
             return Some(result);
         }
 
-        // Check extended nodes
-        drop(bind_space);
-        let extended = self.extended_nodes.read().unwrap();
-        if let Some(node) = extended.get(&(addr.0 as u64)) {
-            self.stats.hot_hits.fetch_add(1, Ordering::Relaxed);
-            return Some(node.clone());
-        }
-
-        // Cache miss - would query Lance here
         self.stats.hot_misses.fetch_add(1, Ordering::Relaxed);
         None
     }
 
     /// Read a node by label
     pub fn read_by_label(&self, label: &str) -> Option<SubstrateNode> {
-        // Scan hot cache
         let bind_space = self.bind_space.read().unwrap();
 
-        // Check surfaces
+        // Check surfaces first
         for prefix in 0..16u8 {
             for slot in 0..=255u8 {
                 let addr = Addr::new(prefix, slot);
@@ -502,8 +483,36 @@ impl Substrate {
             }
         }
 
-        // Scan nodes (would be more efficient with index)
-        // For now, just return None - in production this would query Lance
+        // Check fluid zone (0x10-0x7F)
+        for prefix in 0x10..0x80u8 {
+            for slot in 0..=255u8 {
+                let addr = Addr::new(prefix, slot);
+                if let Some(node) = bind_space.read(addr) {
+                    if node.label.as_deref() == Some(label) {
+                        self.stats.hot_hits.fetch_add(1, Ordering::Relaxed);
+                        let mut result = SubstrateNode::from(node);
+                        result.addr = CogAddr::from_parts(prefix, slot);
+                        return Some(result);
+                    }
+                }
+            }
+        }
+
+        // Check node space (0x80-0xFF)
+        for prefix in 0x80..=0xFFu8 {
+            for slot in 0..=255u8 {
+                let addr = Addr::new(prefix, slot);
+                if let Some(node) = bind_space.read(addr) {
+                    if node.label.as_deref() == Some(label) {
+                        self.stats.hot_hits.fetch_add(1, Ordering::Relaxed);
+                        let mut result = SubstrateNode::from(node);
+                        result.addr = CogAddr::from_parts(prefix, slot);
+                        return Some(result);
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -511,7 +520,7 @@ impl Substrate {
     // WRITE OPERATIONS
     // =========================================================================
 
-    /// Write a node, returns its address
+    /// Write a node to node space (0x80-0xFF), returns its address
     pub fn write(&self, fingerprint: [u64; FINGERPRINT_WORDS]) -> CogAddr {
         let mut bind_space = self.bind_space.write().unwrap();
         let addr = bind_space.write(fingerprint);
@@ -534,7 +543,7 @@ impl Substrate {
         CogAddr::from(addr.0)
     }
 
-    /// Write a node with label
+    /// Write a node with label to node space
     pub fn write_labeled(&self, fingerprint: [u64; FINGERPRINT_WORDS], label: &str) -> CogAddr {
         let mut bind_space = self.bind_space.write().unwrap();
         let addr = bind_space.write_labeled(fingerprint, label);
@@ -552,19 +561,31 @@ impl Substrate {
         CogAddr::from(addr.0)
     }
 
-    /// Write to fluid zone with TTL
+    /// Write to fluid zone (0x10-0x7F) with TTL
     pub fn write_fluid(&self, fingerprint: [u64; FINGERPRINT_WORDS], ttl: Duration) -> CogAddr {
-        let addr = self.write(fingerprint);
+        // Allocate in actual fluid zone
+        let slot = self.next_fluid_slot.fetch_add(1, Ordering::SeqCst);
 
-        // The address will be in fluid zone automatically if we track TTL
-        // For now, store in extended with TTL
-        let mut node = SubstrateNode::new(addr, fingerprint);
-        node.ttl = Some(ttl);
+        // Wrap around within fluid zone (0x1000-0x7FFF)
+        let wrapped = 0x1000 + (slot % 0x7000);
+        let prefix = ((wrapped >> 8) & 0xFF) as u8;
+        let slot_byte = (wrapped & 0xFF) as u8;
 
-        let mut extended = self.extended_nodes.write().unwrap();
-        extended.insert(addr.0 as u64, node);
+        let addr = Addr::new(prefix, slot_byte);
+        let cog_addr = CogAddr::from(addr.0);
 
-        addr
+        // Write to BindSpace
+        let mut bind_space = self.bind_space.write().unwrap();
+        bind_space.write_at(addr, fingerprint);
+        drop(bind_space);
+
+        // Track TTL
+        let mut tracker = self.fluid_tracker.write().unwrap();
+        tracker.insert(cog_addr.0, ttl);
+
+        self.stats.hot_nodes.fetch_add(1, Ordering::Relaxed);
+
+        cog_addr
     }
 
     /// Delete a node
@@ -579,12 +600,12 @@ impl Substrate {
             let mut buffer = self.write_buffer.lock().unwrap();
             buffer.push(WriteOp::DeleteNode(addr));
             self.stats.pending_writes.fetch_add(1, Ordering::Relaxed);
-        }
 
-        // Also check extended
-        drop(bind_space);
-        let mut extended = self.extended_nodes.write().unwrap();
-        extended.remove(&(addr.0 as u64));
+            // Remove from fluid tracker if present
+            drop(bind_space);
+            let mut tracker = self.fluid_tracker.write().unwrap();
+            tracker.remove(addr.0);
+        }
 
         deleted
     }
@@ -683,10 +704,12 @@ impl Substrate {
     // SEARCH OPERATIONS
     // =========================================================================
 
-    /// Search for similar nodes
+    /// Search for similar nodes in node space
+    /// TODO: Integrate HdrIndex for O(log n) performance
     pub fn search(&self, query_fp: &[u64; FINGERPRINT_WORDS], k: usize, threshold: f32) -> Vec<(CogAddr, u32, f32)> {
         let bind_space = self.bind_space.read().unwrap();
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(k * 2);
+        let max_distance = ((1.0 - threshold) * 10000.0) as u32;
 
         // Scan node space (0x80-0xFF)
         for prefix in 0x80..=0xFF_u8 {
@@ -694,15 +717,15 @@ impl Substrate {
                 let addr = Addr::new(prefix, slot);
                 if let Some(node) = bind_space.read(addr) {
                     let dist = hamming_distance(query_fp, &node.fingerprint);
-                    let sim = 1.0 - (dist as f32 / 10000.0);
-                    if sim >= threshold {
+                    if dist <= max_distance {
+                        let sim = 1.0 - (dist as f32 / 10000.0);
                         results.push((CogAddr::from_parts(prefix, slot), dist, sim));
                     }
                 }
             }
         }
 
-        // Sort by distance
+        // Sort by distance and truncate
         results.sort_by_key(|(_, d, _)| *d);
         results.truncate(k);
 
@@ -723,37 +746,111 @@ impl Substrate {
 
     /// Tick: expire old fluid entries, promote/demote as needed
     pub fn tick(&self) {
-        let mut extended = self.extended_nodes.write().unwrap();
-        let mut to_remove = Vec::new();
-        let mut to_promote = Vec::new();
+        // 1. Find and evict expired fluid entries
+        let expired = {
+            let tracker = self.fluid_tracker.read().unwrap();
+            tracker.expired_entries()
+        };
 
-        for (&id, node) in extended.iter() {
-            if node.is_expired() {
-                to_remove.push(id);
-            } else if node.should_promote(self.config.promotion_threshold) {
-                to_promote.push(id);
-            }
-        }
+        for addr in expired {
+            let mut bind_space = self.bind_space.write().unwrap();
+            bind_space.delete(Addr::from(addr));
+            drop(bind_space);
 
-        // Evict expired
-        for id in to_remove {
-            extended.remove(&id);
+            let mut tracker = self.fluid_tracker.write().unwrap();
+            tracker.remove(addr);
+
             self.stats.evictions.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Promote hot entries
-        for id in to_promote {
-            if let Some(mut node) = extended.remove(&id) {
-                node.ttl = None;  // Now permanent
-                // Write to node space
-                let mut bind_space = self.bind_space.write().unwrap();
-                let addr = bind_space.write_labeled(node.fingerprint, node.label.as_deref().unwrap_or(""));
-                node.addr = CogAddr::from(addr.0);
-                drop(bind_space);
+        // 2. Check for promotion candidates in fluid zone
+        // (entries with high access count)
+        let bind_space = self.bind_space.read().unwrap();
+        let mut promote_candidates = Vec::new();
 
-                self.stats.promotions.fetch_add(1, Ordering::Relaxed);
+        for prefix in 0x10..0x80u8 {
+            for slot in 0..=255u8 {
+                let addr = Addr::new(prefix, slot);
+                if let Some(node) = bind_space.read(addr) {
+                    if node.access_count >= self.config.promotion_threshold {
+                        promote_candidates.push((addr, node.fingerprint, node.label.clone()));
+                    }
+                }
             }
         }
+        drop(bind_space);
+
+        // Promote candidates
+        for (old_addr, fingerprint, label) in promote_candidates {
+            // Write to node space
+            let new_addr = if let Some(ref lbl) = label {
+                self.write_labeled(fingerprint, lbl)
+            } else {
+                self.write(fingerprint)
+            };
+
+            // Delete from fluid
+            let mut bind_space = self.bind_space.write().unwrap();
+            bind_space.delete(old_addr);
+            drop(bind_space);
+
+            let mut tracker = self.fluid_tracker.write().unwrap();
+            tracker.remove(old_addr.0);
+
+            self.stats.promotions.fetch_add(1, Ordering::Relaxed);
+            let _ = new_addr; // Used to create the node
+        }
+    }
+
+    /// Crystallize: promote a fluid entry to node space
+    pub fn crystallize(&self, addr: CogAddr) -> Option<CogAddr> {
+        if !addr.is_fluid() {
+            return None;
+        }
+
+        let bind_space = self.bind_space.read().unwrap();
+        let bind_addr = Addr::from(addr.0);
+
+        let node = bind_space.read(bind_addr)?;
+        let fingerprint = node.fingerprint;
+        let label = node.label.clone();
+        drop(bind_space);
+
+        // Write to node space
+        let new_addr = if let Some(ref lbl) = label {
+            self.write_labeled(fingerprint, lbl)
+        } else {
+            self.write(fingerprint)
+        };
+
+        // Delete from fluid
+        self.delete(addr);
+
+        self.stats.promotions.fetch_add(1, Ordering::Relaxed);
+        Some(new_addr)
+    }
+
+    /// Evaporate: demote a node entry to fluid space with TTL
+    pub fn evaporate(&self, addr: CogAddr, ttl: Duration) -> Option<CogAddr> {
+        if !addr.is_node() {
+            return None;
+        }
+
+        let bind_space = self.bind_space.read().unwrap();
+        let bind_addr = Addr::from(addr.0);
+
+        let node = bind_space.read(bind_addr)?;
+        let fingerprint = node.fingerprint;
+        drop(bind_space);
+
+        // Write to fluid zone
+        let new_addr = self.write_fluid(fingerprint, ttl);
+
+        // Delete from node space
+        self.delete(addr);
+
+        self.stats.demotions.fetch_add(1, Ordering::Relaxed);
+        Some(new_addr)
     }
 
     /// Flush write buffer to Lance (sync version)
@@ -878,19 +975,16 @@ mod tests {
     fn test_substrate_search() {
         let substrate = Substrate::default_new();
 
-        // Write some nodes with known fingerprints
         let fp1 = [0xAAAAAAAAAAAAAAAAu64; FINGERPRINT_WORDS];
         let fp2 = [0xBBBBBBBBBBBBBBBBu64; FINGERPRINT_WORDS];
-        let fp3 = [0xAAAAAAAAAAAABBBBu64; FINGERPRINT_WORDS];  // Similar to fp1
+        let fp3 = [0xAAAAAAAAAAAABBBBu64; FINGERPRINT_WORDS];
 
         substrate.write_labeled(fp1, "node1");
         substrate.write_labeled(fp2, "node2");
         substrate.write_labeled(fp3, "node3");
 
-        // Search for fp1-like nodes
         let results = substrate.search(&fp1, 10, 0.5);
 
-        // Should find at least node1 (exact match)
         assert!(!results.is_empty());
     }
 
@@ -901,6 +995,9 @@ mod tests {
         let fp = [99u64; FINGERPRINT_WORDS];
         let addr = substrate.write_fluid(fp, Duration::from_millis(100));
 
+        // Should be in fluid zone
+        assert!(addr.is_fluid());
+
         // Should be readable
         let node = substrate.read(addr);
         assert!(node.is_some());
@@ -909,9 +1006,57 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         substrate.tick();
 
-        // Extended node should be gone
-        let extended = substrate.extended_nodes.read().unwrap();
-        assert!(!extended.contains_key(&(addr.0 as u64)));
+        // Should now be expired
+        let node = substrate.read(addr);
+        assert!(node.is_none());
+    }
+
+    #[test]
+    fn test_substrate_crystallize() {
+        let substrate = Substrate::default_new();
+
+        // Write to fluid
+        let fp = [77u64; FINGERPRINT_WORDS];
+        let fluid_addr = substrate.write_fluid(fp, Duration::from_secs(300));
+        assert!(fluid_addr.is_fluid());
+
+        // Crystallize to node
+        let node_addr = substrate.crystallize(fluid_addr);
+        assert!(node_addr.is_some());
+        assert!(node_addr.unwrap().is_node());
+
+        // Old address should be gone
+        let old = substrate.read(fluid_addr);
+        assert!(old.is_none());
+
+        // New address should have the data
+        let new = substrate.read(node_addr.unwrap());
+        assert!(new.is_some());
+        assert_eq!(new.unwrap().fingerprint, fp);
+    }
+
+    #[test]
+    fn test_substrate_evaporate() {
+        let substrate = Substrate::default_new();
+
+        // Write to node space
+        let fp = [88u64; FINGERPRINT_WORDS];
+        let node_addr = substrate.write(fp);
+        assert!(node_addr.is_node());
+
+        // Evaporate to fluid
+        let fluid_addr = substrate.evaporate(node_addr, Duration::from_secs(60));
+        assert!(fluid_addr.is_some());
+        assert!(fluid_addr.unwrap().is_fluid());
+
+        // Old address should be gone
+        let old = substrate.read(node_addr);
+        assert!(old.is_none());
+
+        // New address should have the data
+        let new = substrate.read(fluid_addr.unwrap());
+        assert!(new.is_some());
+        assert_eq!(new.unwrap().fingerprint, fp);
     }
 
     #[test]
@@ -943,7 +1088,6 @@ mod tests {
 
         substrate.commit();
 
-        // Version should increment
         assert_eq!(substrate.version(), 2);
     }
 }
