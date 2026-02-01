@@ -40,6 +40,7 @@ pub mod resilient;
 pub mod concurrency;
 pub mod snapshots;
 pub mod corpus;
+pub mod service;
 
 #[cfg(feature = "lancedb")]
 pub use lance::{LanceStore, NodeRecord, EdgeRecord};
@@ -175,4 +176,26 @@ pub use corpus::{
     parse_gutenberg, load_gutenberg_book,
     // Errors
     CorpusError,
+};
+
+// Service exports (container lifecycle, DuckDB-inspired buffering)
+pub use service::{
+    // CPU detection
+    CpuFeatures,
+    // Buffer pool (DuckDB-style)
+    BufferPoolConfig, BufferPool, BufferPoolStats,
+    // Schema hydration
+    AddressSchema, ZoneDescriptor,
+    // Recovery
+    RecoveryManifest,
+    // Vectorized batching
+    DataBatch, batch_hamming_distance,
+    // Column operations (Lance-style)
+    ColumnBatch, ColumnType,
+    // Service container
+    ServiceConfig, CognitiveService, ServiceHealth,
+    // Compile hints
+    AVX512_RUSTFLAGS, DOCKER_BUILD_CMD,
+    // Errors
+    ServiceError,
 };
