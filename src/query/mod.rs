@@ -81,6 +81,8 @@ pub use cognitive_udfs::{
     NarsInductionUdf,
     NarsAbductionUdf,
     NarsRevisionUdf,
+    MembraneEncodeUdf,
+    MembraneDecodeUdf,
 };
 
 #[derive(thiserror::Error, Debug)]

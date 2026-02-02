@@ -1110,6 +1110,187 @@ fn nars_result_scalar(f: f64, c: f64) -> ColumnarValue {
 }
 
 // =============================================================================
+// MEMBRANE UDFs (Sigma-10 Consciousness Encoding)
+// =============================================================================
+
+use crate::cognitive::membrane::{Membrane, ConsciousnessParams};
+
+/// Membrane Encode: tau, sigma, qualia -> 10K-bit fingerprint
+///
+/// Encodes consciousness parameters into a searchable fingerprint:
+/// - tau (temporal) -> bits 0-3333
+/// - sigma (signal) -> bits 3334-6666
+/// - qualia (semantic) -> bits 6667-9999
+#[derive(Debug)]
+pub struct MembraneEncodeUdf {
+    signature: Signature,
+}
+
+impl MembraneEncodeUdf {
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::exact(
+                vec![DataType::Float32, DataType::Float32, DataType::Utf8],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl Default for MembraneEncodeUdf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScalarUDFImpl for MembraneEncodeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "membrane_encode"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::FixedSizeBinary(FP_BYTES as i32))
+    }
+
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+        // Extract scalar arguments
+        let tau = match &args[0] {
+            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Float32(Some(v))) => *v,
+            _ => return Err(datafusion::error::DataFusionError::Execution(
+                "membrane_encode requires Float32 for tau".into(),
+            )),
+        };
+        let sigma = match &args[1] {
+            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Float32(Some(v))) => *v,
+            _ => return Err(datafusion::error::DataFusionError::Execution(
+                "membrane_encode requires Float32 for sigma".into(),
+            )),
+        };
+        let qualia = match &args[2] {
+            ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Utf8(Some(s))) => s.clone(),
+            _ => return Err(datafusion::error::DataFusionError::Execution(
+                "membrane_encode requires Utf8 for qualia".into(),
+            )),
+        };
+
+        // Encode using membrane
+        let mut membrane = Membrane::default();
+        let params = ConsciousnessParams::new(tau, sigma, qualia);
+        let fp = membrane.encode(&params);
+        let bytes = fp.to_bytes();
+
+        Ok(ColumnarValue::Scalar(
+            datafusion::scalar::ScalarValue::FixedSizeBinary(
+                FP_BYTES as i32,
+                Some(bytes),
+            ),
+        ))
+    }
+}
+
+/// Membrane Decode: 10K-bit fingerprint -> tau, sigma, qualia_placeholder
+///
+/// Decodes a consciousness fingerprint back to approximate parameters.
+/// Note: qualia cannot be recovered (hash is one-way).
+#[derive(Debug)]
+pub struct MembraneDecodeUdf {
+    signature: Signature,
+}
+
+impl MembraneDecodeUdf {
+    pub fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::FixedSizeBinary(FP_BYTES as i32)]),
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Any(1),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl Default for MembraneDecodeUdf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScalarUDFImpl for MembraneDecodeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "membrane_decode"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Struct(
+            vec![
+                Field::new("tau", DataType::Float32, false),
+                Field::new("sigma", DataType::Float32, false),
+                Field::new("qualia", DataType::Utf8, false),
+            ]
+            .into(),
+        ))
+    }
+
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+        let bytes = match &args[0] {
+            ColumnarValue::Scalar(s) => scalar_to_bytes(s)?,
+            _ => return Err(datafusion::error::DataFusionError::Execution(
+                "membrane_decode requires scalar binary".into(),
+            )),
+        };
+
+        // Decode using membrane
+        let fp = crate::core::Fingerprint::from_bytes(&bytes).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!("Invalid fingerprint: {}", e))
+        })?;
+        let mut membrane = Membrane::default();
+        let params = membrane.decode(&fp);
+
+        // Build result struct
+        use datafusion::scalar::ScalarValue;
+        let tau_field = Field::new("tau", DataType::Float32, false);
+        let sigma_field = Field::new("sigma", DataType::Float32, false);
+        let qualia_field = Field::new("qualia", DataType::Utf8, false);
+
+        Ok(ColumnarValue::Scalar(ScalarValue::Struct(Arc::new(
+            StructArray::from(vec![
+                (
+                    Arc::new(tau_field),
+                    Arc::new(Float32Array::from(vec![params.tau])) as ArrayRef,
+                ),
+                (
+                    Arc::new(sigma_field),
+                    Arc::new(Float32Array::from(vec![params.sigma])) as ArrayRef,
+                ),
+                (
+                    Arc::new(qualia_field),
+                    Arc::new(StringArray::from(vec![params.qualia.as_str()])) as ArrayRef,
+                ),
+            ]),
+        ))))
+    }
+}
+
+// =============================================================================
 // UDF REGISTRATION
 // =============================================================================
 
@@ -1133,6 +1314,10 @@ pub fn register_cognitive_udfs(ctx: &SessionContext) {
     ctx.register_udf(ScalarUDF::from(NarsInductionUdf::new()));
     ctx.register_udf(ScalarUDF::from(NarsAbductionUdf::new()));
     ctx.register_udf(ScalarUDF::from(NarsRevisionUdf::new()));
+
+    // Consciousness membrane
+    ctx.register_udf(ScalarUDF::from(MembraneEncodeUdf::new()));
+    ctx.register_udf(ScalarUDF::from(MembraneDecodeUdf::new()));
 }
 
 /// Create all UDFs as a vector
@@ -1148,6 +1333,8 @@ pub fn all_cognitive_udfs() -> Vec<ScalarUDF> {
         ScalarUDF::from(NarsInductionUdf::new()),
         ScalarUDF::from(NarsAbductionUdf::new()),
         ScalarUDF::from(NarsRevisionUdf::new()),
+        ScalarUDF::from(MembraneEncodeUdf::new()),
+        ScalarUDF::from(MembraneDecodeUdf::new()),
     ]
 }
 
@@ -1215,7 +1402,8 @@ mod tests {
         let ctx = SessionContext::new();
         register_cognitive_udfs(&ctx);
 
-        let udfs = ctx.state().scalar_functions();
+        let state = ctx.state();
+        let udfs = state.scalar_functions();
         assert!(udfs.contains_key("hamming"));
         assert!(udfs.contains_key("similarity"));
         assert!(udfs.contains_key("popcount"));
