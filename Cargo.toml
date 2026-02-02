@@ -40,6 +40,7 @@ spo = ["reqwest"]                # Subject-Predicate-Object triples
 compress = ["lz4"]               # Compression support
 quantum = []                     # Quantum-inspired operators
 bench = []                       # Benchmark suite (comparison vs Qdrant/Milvus)
+flight = ["arrow-flight", "tonic", "prost"]  # Arrow Flight MCP server
 
 # All features
 full = [
@@ -66,6 +67,10 @@ arrow-data = "57"
 arrow-cast = "57"
 arrow-select = "57"
 parquet = { version = "57", features = ["snap", "lz4", "zstd"] }
+arrow-flight = { version = "57", features = ["flight-sql-experimental"], optional = true }
+arrow-ipc = "57"
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
 bytes = "1.11"
 
 # -----------------------------------------------------------------------------
