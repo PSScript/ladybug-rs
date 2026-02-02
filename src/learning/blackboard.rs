@@ -140,7 +140,7 @@ impl Blackboard {
     }
     
     pub fn to_yaml(&self) -> String {
-        serde_yaml::to_string(self).unwrap_or_default()
+        serde_yml::to_string(self).unwrap_or_default()
     }
     
     pub fn to_json(&self) -> String {
