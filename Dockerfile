@@ -1,5 +1,5 @@
 # =============================================================================
-# LadybugDB — Docker Multi-Stage Build (v2)
+# LadybugDB — Docker Multi-Stage Build (v3)
 # =============================================================================
 # Triple-binary: AVX-512, AVX-2, and generic x86-64
 # Runtime auto-selects best binary via /proc/cpuinfo
@@ -20,8 +20,9 @@
 
 # =============================================================================
 # STAGE 1: Builder — compile three binaries
+# Rust 1.93 stable (edition 2024 support, full rmp-serde/time compat)
 # =============================================================================
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:1.93-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config libssl-dev cmake protobuf-compiler \
