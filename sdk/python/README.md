@@ -1,16 +1,21 @@
-# LadybugDB Python SDK
+# LadybugDB Python SDK (`ladybug-vsa`)
 
 Production-ready Python client for LadybugDB cognitive database.
 
 ## Installation
 
 ```bash
-# No dependencies required (uses stdlib)
-pip install ladybugdb
+# From PyPI (zero dependencies)
+pip install ladybug-vsa
 
 # Or install from source
 cd sdk/python
 pip install -e .
+```
+
+**Import as:**
+```python
+from ladybugdb import LadybugDB  # Module name is still ladybugdb
 ```
 
 ## Quick Start

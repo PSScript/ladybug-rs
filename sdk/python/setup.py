@@ -2,7 +2,7 @@
 from setuptools import setup
 
 setup(
-    name="ladybugdb",
+    name="ladybug-vsa",
     version="0.3.0",
     description="Python SDK for LadybugDB cognitive database",
     long_description=open("README.md").read() if __import__("os").path.exists("README.md") else "",
