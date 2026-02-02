@@ -160,7 +160,7 @@ impl CrystalCodebook {
     
     pub fn init_kmeans_pp(&mut self, samples: &[Fingerprint]) {
         if samples.is_empty() { return; }
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         
         // First centroid
         let first = &samples[rng.gen_range(0..samples.len())];
@@ -279,7 +279,7 @@ impl BTRProcella {
     }
     
     pub fn choose(&self, state: (f64, f64, f64)) -> RLAction {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         if rng.gen::<f64>() < self.epsilon {
             match rng.gen_range(0..4) {
                 0 => RLAction::IncreaseResidual,
