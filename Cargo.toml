@@ -72,7 +72,7 @@ bytes = "1.11"
 # Query: DataFusion SQL engine
 # DataFusion 52.x with sort pushdown for HDR cascade TopK
 # -----------------------------------------------------------------------------
-datafusion = "51"
+datafusion = "52"
 sqlparser = "0.60"
 
 # -----------------------------------------------------------------------------
