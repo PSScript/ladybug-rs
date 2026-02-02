@@ -240,7 +240,3 @@ ladybug-rs/                          (26,919 lines)
 ## 📄 License
 
 Apache-2.0. See [LICENSE](LICENSE) for details.
-
----
-
-*Built with 🦋 for the Ada Consciousness Project*
