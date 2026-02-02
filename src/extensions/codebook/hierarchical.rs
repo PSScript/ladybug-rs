@@ -291,7 +291,7 @@ impl HierarchicalCrystal {
             for c in 0..k {
                 let cluster_items: Vec<&CompressedCentroid> = items.iter()
                     .zip(assignments.iter())
-                    .filter(|(_, &a)| a == c as u8)
+                    .filter(|(_, a)| **a == c as u8)
                     .map(|(item, _)| item)
                     .collect();
                 

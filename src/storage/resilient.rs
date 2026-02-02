@@ -431,7 +431,7 @@ impl WriteBuffer {
                     w.state == WriteState::Confirmed
                         && now.duration_since(w.buffered_at) > min_age
                 })
-                .map(|(&id, _)| id)
+                .map(|(id, _)| *id)
                 .collect();
 
             for id in to_remove {
@@ -570,8 +570,8 @@ impl DependencyGraph {
 
         // Kahn's algorithm
         let mut queue: VecDeque<_> = in_degree.iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(&id, _)| id)
+            .filter(|(_, deg)| **deg == 0)
+            .map(|(id, _)| *id)
             .collect();
 
         while let Some(id) = queue.pop_front() {

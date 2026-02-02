@@ -237,8 +237,8 @@ impl TtlManager {
             .as_micros() as u64;
 
         self.expirations.iter()
-            .filter(|(_, &expires_at)| now >= expires_at)
-            .map(|(&addr, _)| addr)
+            .filter(|(_, expires_at)| now >= **expires_at)
+            .map(|(addr, _)| *addr)
             .collect()
     }
 
@@ -416,7 +416,7 @@ impl WriteAheadLog {
     /// Append entry to WAL
     pub fn append(&mut self, entry: &WalEntry) -> std::io::Result<()> {
         let bytes = entry.to_bytes();
-        if let Some(ref mut file) = self.file {
+        if let Some(file) = &mut self.file {
             file.write_all(&bytes)?;
             self.size += bytes.len();
             self.entries_since_checkpoint += 1;
@@ -436,7 +436,7 @@ impl WriteAheadLog {
     /// Perform checkpoint (truncate WAL)
     pub fn checkpoint(&mut self) -> std::io::Result<()> {
         // Flush and close current file
-        if let Some(ref mut file) = self.file {
+        if let Some(file) = &mut self.file {
             file.flush()?;
         }
         self.file = None;

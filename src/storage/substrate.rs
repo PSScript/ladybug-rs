@@ -377,7 +377,7 @@ impl FluidTracker {
         self.entries
             .iter()
             .filter(|(_, (created, ttl))| created.elapsed() > *ttl)
-            .map(|(&addr, _)| addr)
+            .map(|(addr, _)| *addr)
             .collect()
     }
 }

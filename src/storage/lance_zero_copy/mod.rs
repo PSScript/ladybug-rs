@@ -155,8 +155,10 @@ impl FingerprintBuffer {
     /// Caller must ensure index < self.len()
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &[u64; FINGERPRINT_WORDS] {
-        let ptr = self.as_ptr().add(index * FINGERPRINT_WORDS) as *const [u64; FINGERPRINT_WORDS];
-        &*ptr
+        unsafe {
+            let ptr = self.as_ptr().add(index * FINGERPRINT_WORDS) as *const [u64; FINGERPRINT_WORDS];
+            &*ptr
+        }
     }
 
     /// Number of fingerprints
@@ -1267,7 +1269,7 @@ impl LanceView {
     #[cfg(feature = "lance")]
     #[inline]
     pub unsafe fn fingerprint_unchecked(&self, index: usize) -> &[u64; FINGERPRINT_WORDS] {
-        &*(self.fingerprint_ptr.add(index * FINGERPRINT_WORDS) as *const [u64; FINGERPRINT_WORDS])
+        unsafe { &*(self.fingerprint_ptr.add(index * FINGERPRINT_WORDS) as *const [u64; FINGERPRINT_WORDS]) }
     }
 
     /// Safe access to fingerprint
@@ -1405,10 +1407,10 @@ impl ScentAwareness {
         let mut candidates: Vec<(u32, u8)> = self.access_counts
             .iter()
             .enumerate()
-            .filter(|(idx, &count)| {
-                count > 5 && self.hot_indices.binary_search(&(*idx as u32)).is_err()
+            .filter(|(idx, count)| {
+                **count > 5 && self.hot_indices.binary_search(&(*idx as u32)).is_err()
             })
-            .map(|(idx, &count)| (idx as u32, count))
+            .map(|(idx, count)| (idx as u32, *count))
             .collect();
 
         candidates.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by access count desc
@@ -2593,7 +2595,7 @@ impl CsrBuilder {
         for neighbors in &self.adj_list {
             for &(dst, weight) in neighbors {
                 edges.push(dst);
-                if let Some(ref mut w) = weights {
+                if let Some(w) = &mut weights {
                     w.push(weight);
                 }
             }

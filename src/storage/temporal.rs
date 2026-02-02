@@ -299,9 +299,9 @@ impl VersionManager {
     pub fn version_at_time(&self, ts: Timestamp) -> Option<Version> {
         let times = self.version_times.read().ok()?;
         times.iter()
-            .filter(|(_, &t)| t <= ts)
+            .filter(|(_, t)| **t <= ts)
             .max_by_key(|(v, _)| *v)
-            .map(|(&v, _)| v)
+            .map(|(v, _)| *v)
     }
 
     /// Update minimum retained version
