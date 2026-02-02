@@ -52,12 +52,20 @@ Version: 0.3.0
 from __future__ import annotations
 import json
 import base64
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Literal
 from dataclasses import dataclass, field
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-__version__ = "0.3.0"
+# Optional Arrow Flight support
+try:
+    import pyarrow as pa
+    import pyarrow.flight as flight
+    HAS_FLIGHT = True
+except ImportError:
+    HAS_FLIGHT = False
+
+__version__ = "0.4.0"
 __all__ = [
     "LadybugDB", "Client", "Fingerprint", "TruthValue",
     "SearchResult", "NARSEngine", "connect",
