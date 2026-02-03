@@ -16,6 +16,8 @@ pub mod quantum_7d;
 pub mod quantum_11d;
 pub mod quantum_13d;
 pub mod quantum_17d;
+pub mod bitchain_5d;
+pub mod bitchain_7d;
 
 pub use crystal4k::*;
 pub use field::*;
@@ -28,3 +30,5 @@ pub use quantum_7d::*;
 pub use quantum_11d::*;
 pub use quantum_13d::*;
 pub use quantum_17d::*;
+pub use bitchain_5d::*;
+pub use bitchain_7d::*;
